@@ -1,0 +1,18 @@
+Completed the DQN implementation on FrozenLake-v1, using a double-DQN:
+- All config files in configs/
+- Training script in scripts/
+- Full W&B integration
+- Structure allows for full modularity with different agents, envs, replay buffers, etc.
+- Main double DQN algorithm in src/algo/dqn.py
+- DQN agent with full training routine in src/agents/dqn_agent.py
+- Uniform replay buffer in src/replay/uniform.py
+- DQNAgent class allows for full PER integration later, simply by swapping to a PER replay buffer
+- DQNAgent also has weights and indices... hopefully I don't need to add anything else for the IS implementation within the PER paper
+- Environment is created in src/envs/frozenlake_env.py
+- Full seeding for reproducibility in src/utils/seed.py and in the environment (seed for )
+
+
+
+Overall, fully implemented Double DQN on FrozenLake-v1 baseline. The structure should easily allow for other agents, envs, replay buffers, etc.
+Will properly tune on environment first, then implement PER.
+Will do research on alternative ``simple'' stochastic environments to test it on.

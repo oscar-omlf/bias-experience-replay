@@ -5,6 +5,7 @@ replay:
   type: uniform      # uniform | per | ...
   capacity: 100000
   batch_size: 64
+  eps: 1.0e-6
 
 # Exploration
 epsilon:
