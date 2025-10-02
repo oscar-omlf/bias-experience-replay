@@ -1,0 +1,21 @@
+defaults:
+  - env: frozenlake
+  - agents: dqn
+  - _self_
+
+seed: 1
+device: auto
+
+wandb:
+  project: bias-experience-replay
+  entity: bias-experience-replay
+  mode: online
+  group: null
+  job_type: train
+  tags: ["baseline", "double-dqn", "frozenlake"]
+
+train:
+  total_steps: 50000
+  eval_interval_episodes: 25
+  checkpoint_interval_episodes: 0
+  save_dir: outputs/checkpoints
