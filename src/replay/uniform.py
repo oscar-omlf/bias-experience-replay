@@ -17,14 +17,18 @@ class UniformReplayBuffer(ReplayBuffer):
         self.next_obs = np.zeros_like(self.obs)
         self.actions = np.zeros((capacity,), dtype=np.int64)
         self.rewards = np.zeros((capacity,), dtype=np.float32)
-        self.dones = np.zeros((capacity,), dtype=np.float32)
+        self.terminated = np.zeros((capacity,), dtype=np.float32)
+        self.truncated = np.zeros((capacity,), dtype=np.float32)
+        # self.dones = np.zeros((capacity,), dtype=np.float32)
 
-    def add(self, obs, action, reward, next_obs, done):
+    def add(self, obs, action, reward, next_obs, terminated, truncated):
         self.obs[self.pos] = obs
         self.actions[self.pos] = action
         self.rewards[self.pos] = reward
         self.next_obs[self.pos] = next_obs
-        self.dones[self.pos] = float(done)
+        self.terminated[self.pos] = float(terminated)
+        self.truncated[self.pos] = float(truncated)
+        # self.dones[self.pos] = float(terminated or truncated)
         self.pos = (self.pos + 1) % self.capacity
         if self.pos == 0:
             self.full = True
@@ -38,7 +42,9 @@ class UniformReplayBuffer(ReplayBuffer):
             actions=self.actions[idxs],
             rewards=self.rewards[idxs],
             next_obs=self.next_obs[idxs],
-            dones=self.dones[idxs],
+            terminated=self.terminated[idxs],
+            truncated=self.truncated[idxs],
+            # dones=self.dones[idxs],
             indices=idxs,
             weights=np.ones((batch_size,), dtype=np.float32),
         )

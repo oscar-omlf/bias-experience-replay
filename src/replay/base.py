@@ -4,7 +4,7 @@ from typing import Dict
 
 class ReplayBuffer(ABC):
     @abstractmethod
-    def add(self, obs, action, reward, next_obs, done):
+    def add(self, obs, action, reward, next_obs, terminated, truncated):
         ...
 
     @abstractmethod

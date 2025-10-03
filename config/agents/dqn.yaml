@@ -3,36 +3,37 @@ algo: dqn
 # Replay / sampling
 replay:
   type: uniform      # uniform | per | ...
-  capacity: 100000
-  batch_size: 64
+  capacity: 1000000
+  batch_size: 32
   eps: 1.0e-6
 
 # Exploration
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 50000
+  decay_steps: 40000
 
 # Optimization
 optimizer:
-  lr: 1.0e-3
-  weight_decay: 0.0
+  lr: 1e-4
+  weight_decay: 1e-5 
 
 # DQN / DDQN specifics
 gamma: 0.99
-train_freq: 1              # gradient step each env step
-learning_starts: 1000
+handle_time_limit_as_terminal: true
+train_freq: 4              # gradient step each env step
+learning_starts: 500
 gradient_steps: 1
 max_grad_norm: 10.0
 
 target_update:
-  interval: 1000
+  interval: 5000
   tau: 1.0
 
 # Network
 model:
   type: mlp
-  hidden_sizes: [128, 128]
+  hidden_sizes: [64, 64]
   activation: relu
 
 # Logging and eVal

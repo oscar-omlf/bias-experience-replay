@@ -93,9 +93,9 @@ class DQNAgent:
         q = self.q_net(self._encode_obs(obs))
         return int(q.argmax(dim=1).item())
 
-    def _push_transition(self, o, a, r, no, d):
+    def _push_transition(self, o, a, r, no, terminated, truncated):
         # Store raw obs (int for FrozenLake), though buffer handles types
-        self.replay.add(o, a, r, no, d)
+        self.replay.add(o, a, r, no, terminated, truncated)
 
     def _sample_batch(self) -> Dict[str, torch.Tensor]:
         batch = self.replay.sample(self.cfg.agents.replay.batch_size)
@@ -110,7 +110,10 @@ class DQNAgent:
         )
         actions = torch.as_tensor(batch["actions"], dtype=torch.long, device=self.device)
         rewards = torch.as_tensor(batch["rewards"], dtype=torch.float32, device=self.device)
-        dones = torch.as_tensor(batch["dones"], dtype=torch.float32, device=self.device)
+        terminated = torch.as_tensor(batch["terminated"], dtype=torch.float32, device=self.device)
+        truncated = torch.as_tensor(batch["truncated"], dtype=torch.float32, device=self.device)
+        
+        # dones = torch.as_tensor(batch["dones"], dtype=torch.float32, device=self.device)
 
         # This is to implement PER later
         weights = batch.get("weights", None)
@@ -123,7 +126,7 @@ class DQNAgent:
         
         return dict(
             obs=obs, actions=actions, rewards=rewards, 
-            next_obs=next_obs, dones=dones, 
+            next_obs=next_obs, terminated=terminated, truncated=truncated,
             weights=weights, indices=indices
         )
 
@@ -144,7 +147,7 @@ class DQNAgent:
             ep_len = 0
             while not done:
                 a = self._select_action(obs, epsilon=0.0)
-                next_obs, r, terminated, truncated, info = self.eval_env.step(a)
+                next_obs, r, terminated, truncated, _ = self.eval_env.step(a)
                 done = terminated or truncated
                 ep_ret += r
                 ep_len += 1
@@ -162,7 +165,7 @@ class DQNAgent:
         return metrics
 
     def train(self):
-        o, info = self.env.reset()
+        o, _ = self.env.reset()
         ep = 0
         ep_stats = EpisodeStats()
 
@@ -172,7 +175,7 @@ class DQNAgent:
             no, r, terminated, truncated, _ = self.env.step(a)
             d = terminated or truncated
 
-            self._push_transition(o, a, r, no, d)
+            self._push_transition(o, a, r, no, terminated, truncated)
             ep_stats.reward_sum += r
             ep_stats.length += 1
             if r > 0:

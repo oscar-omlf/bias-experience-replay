@@ -16,11 +16,15 @@ class DoubleDQN:
         actions = batch["actions"].long()
         rewards = batch["rewards"]
         next_obs = batch["next_obs"]
-        dones = batch["dones"]
+        terminated = batch["terminated"]
+        truncated = batch["truncated"]
+        # dones = batch["dones"]
         weights = batch.get("weights", None)
 
         if weights is None:
             weights = torch.ones_like(rewards)
+
+        # TODO: Set dones to truncated or terminated if handle_time_limit_as_terminal
 
         # Q(s, a)
         q_values = self.q_net(obs)
@@ -32,6 +36,10 @@ class DoubleDQN:
             next_actions = next_q_online.argmax(dim=1)
             next_q_target = self.target_q_net(next_obs)
             next_q = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+
+            # target = rewards + (1.0 - terminated) * self.gamma * next_q
+            
+            dones = terminated + truncated
             target = rewards + (1.0 - dones) * self.gamma * next_q
 
         # loss = F.smooth_l1_loss(q_sa, target)
