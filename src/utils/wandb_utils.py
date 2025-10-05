@@ -1,4 +1,3 @@
-# src/utils/wandb_utils.py
 from typing import Any, Dict, Optional
 import wandb
 

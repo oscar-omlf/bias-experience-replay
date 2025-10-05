@@ -4,12 +4,13 @@ import torch.nn.functional as F
 
 
 class DoubleDQN:
-    def __init__(self, q_net, target_q_net, gamma: float = 0.99, max_grad_norm: float = 10.0, device: str = "cpu"):
+    def __init__(self, q_net, target_q_net, gamma: float = 0.99, max_grad_norm: float = 10.0, device: str = "cpu", handle_time_limit_as_terminal: bool = True):
         self.q_net = q_net
         self.target_q_net = target_q_net
         self.gamma = gamma
         self.max_grad_norm = max_grad_norm
         self.device = device
+        self.handle_time_limit_as_terminal = handle_time_limit_as_terminal
 
     def compute_loss(self, batch: Dict, optimizer) -> Tuple[torch.Tensor, Dict]:
         obs = batch["obs"]
@@ -24,8 +25,6 @@ class DoubleDQN:
         if weights is None:
             weights = torch.ones_like(rewards)
 
-        # TODO: Set dones to truncated or terminated if handle_time_limit_as_terminal
-
         # Q(s, a)
         q_values = self.q_net(obs)
         q_sa = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
@@ -37,15 +36,16 @@ class DoubleDQN:
             next_q_target = self.target_q_net(next_obs)
             next_q = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
 
-            # target = rewards + (1.0 - terminated) * self.gamma * next_q
-            
-            dones = terminated + truncated
+            if self.handle_time_limit_as_terminal:
+                dones = torch.maximum(terminated, truncated)
+            else:
+                dones = terminated
+
             target = rewards + (1.0 - dones) * self.gamma * next_q
 
         # loss = F.smooth_l1_loss(q_sa, target)
         per_sample_loss = F.smooth_l1_loss(q_sa, target, reduction="none")
         loss = (weights * per_sample_loss).mean()
-
         optimizer.zero_grad()
         loss.backward()
         
@@ -55,7 +55,6 @@ class DoubleDQN:
             grad_norm = float(grad_norm.item())
         
         optimizer.step()
-
         with torch.no_grad():
             td_errors = (q_sa - target)
             td_error_mean = float(td_errors.abs().mean().item())
@@ -73,3 +72,8 @@ class DoubleDQN:
     @torch.no_grad()
     def hard_update(self):
         self.target_q_net.load_state_dict(self.q_net.state_dict())
+
+    @torch.no_grad()
+    def soft_update(self, tau: float):
+        for target_param, online_param in zip(self.target_q_net.parameters(), self.q_net.parameters()):
+            target_param.data.copy_(tau * online_param.data + (1.0 - tau) * target_param.data)

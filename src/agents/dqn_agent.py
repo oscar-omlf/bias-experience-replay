@@ -61,6 +61,7 @@ class DQNAgent:
             gamma=self.cfg.agents.gamma,
             max_grad_norm=self.cfg.agents.max_grad_norm,
             device=self.device,
+            handle_time_limit_as_terminal=self.cfg.agents.handle_time_limit_as_terminal,
         )
 
         # Replay
@@ -74,6 +75,8 @@ class DQNAgent:
         )
 
         self.global_step = 0
+
+        print(f"[Init] Loaded {self.cfg.agents.algo} agent with {self.cfg.agents.replay.type} replay.")
     
     def _encode_obs(self, obs):
         x = self.obs_adapter(obs)
@@ -132,7 +135,11 @@ class DQNAgent:
 
     def _maybe_update_target(self):
         if self.global_step > 0 and (self.global_step % self.cfg.agents.target_update.interval == 0):
-            self.algo.hard_update()
+            tau = self.cfg.agents.target_update.tau
+            if tau == 1.0:
+                self.algo.hard_update()
+            else:
+                self.algo.soft_update(tau)
             self.target_updates += 1
             log_metrics({"train/target_updates": self.target_updates}, step=self.global_step)
 

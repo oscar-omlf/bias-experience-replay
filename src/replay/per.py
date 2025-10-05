@@ -1,0 +1,120 @@
+from typing import Dict
+import numpy as np
+from .base import ReplayBuffer
+
+class SumTree:
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.tree = np.zeros(2 * capacity - 1)
+        self.data_pointer = 0
+
+    def add(self, priority: float):
+        tree_idx = self.data_pointer + self.capacity - 1
+        self.update(tree_idx, priority)
+        self.data_pointer = (self.data_pointer + 1) % self.capacity
+
+    def update(self, tree_idx: int, priority: float):
+        change = priority - self.tree[tree_idx]
+        self.tree[tree_idx] += change
+        while tree_idx != 0:
+            tree_idx = (tree_idx - 1) // 2
+            self.tree[tree_idx] += change
+
+    def get_leaf(self, v: float):
+        parent_idx = 0
+        while True:
+            left_child_idx = 2 * parent_idx + 1
+            right_child_idx = left_child_idx + 1
+            if left_child_idx >= len(self.tree):
+                leaf_idx = parent_idx
+                break
+            else:
+                if v <= self.tree[left_child_idx]:
+                    parent_idx = left_child_idx
+                else:
+                    v -= self.tree[left_child_idx]
+                    parent_idx = right_child_idx
+        data_idx = leaf_idx - self.capacity + 1
+        return leaf_idx, self.tree[leaf_idx], data_idx
+
+    def total_priority(self) -> float:
+        return self.tree[0]
+
+class PrioritizedReplayBuffer(ReplayBuffer):
+    def __init__(self, capacity: int, obs_shape, alpha: float = 0.6, beta: float = 0.4, beta_anneal_steps: int = 0, device: str = "cpu"):
+        self.capacity = int(capacity)
+        self.alpha = alpha
+        self.beta_start = beta
+        self.beta = beta
+        self.beta_anneal_steps = beta_anneal_steps if beta_anneal_steps > 0 else None
+        self.device = device
+        self.tree = SumTree(capacity)
+        self.max_priority = 1.0
+        self.pos = 0
+        self.full = False
+        self.current_size = 0
+        self.step = 0  # For beta annealing
+        if isinstance(obs_shape, int):
+            self.obs = np.zeros((capacity,), dtype=np.int64)
+        else:
+            self.obs = np.zeros((capacity,) + obs_shape, dtype=np.float32)
+        self.next_obs = np.zeros_like(self.obs)
+        self.actions = np.zeros((capacity,), dtype=np.int64)
+        self.rewards = np.zeros((capacity,), dtype=np.float32)
+        self.terminated = np.zeros((capacity,), dtype=np.float32)
+        self.truncated = np.zeros((capacity,), dtype=np.float32)
+
+    def add(self, obs, action, reward, next_obs, terminated, truncated):
+        self.obs[self.pos] = obs
+        self.actions[self.pos] = action
+        self.rewards[self.pos] = reward
+        self.next_obs[self.pos] = next_obs
+        self.terminated[self.pos] = float(terminated)
+        self.truncated[self.pos] = float(truncated)
+        priority = self.max_priority ** self.alpha
+        self.tree.add(priority)
+        self.pos = (self.pos + 1) % self.capacity
+        if not self.full:
+            self.current_size += 1
+        if self.pos == 0:
+            self.full = True
+
+    def sample(self, batch_size: int) -> Dict:
+        indices = []
+        priorities = []
+        total_prio = self.tree.total_priority()
+        segment = total_prio / batch_size
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            v = np.random.uniform(a, b)
+            tree_idx, p, data_idx = self.tree.get_leaf(v)
+            priorities.append(p)
+            indices.append(data_idx)
+        probs = np.array(priorities) / total_prio
+        n = self.current_size
+        weights = (n * probs) ** (-self.beta)
+        weights /= weights.max()  # Normalize
+        self.step += 1
+        if self.beta_anneal_steps:
+            self.beta = self.beta_start + (1.0 - self.beta_start) * min(1.0, self.step / self.beta_anneal_steps)
+        batch = dict(
+            obs=self.obs[indices],
+            actions=self.actions[indices],
+            rewards=self.rewards[indices],
+            next_obs=self.next_obs[indices],
+            terminated=self.terminated[indices],
+            truncated=self.truncated[indices],
+            indices=np.array(indices),
+            weights=weights,
+        )
+        return batch
+
+    def update_priorities(self, indices, priorities):
+        for idx, prio in zip(indices, priorities):
+            self.max_priority = max(self.max_priority, prio)
+            prio = prio ** self.alpha
+            self.tree.update(idx + self.capacity - 1, prio)
+
+    def __len__(self) -> int:
+        return self.current_size

@@ -1,4 +1,5 @@
 from .uniform import UniformReplayBuffer
+from .per import PrioritizedReplayBuffer
 from .base import ReplayBuffer
 
 
@@ -16,6 +17,13 @@ def make_replay(cfg, obs_space, device: str) -> ReplayBuffer:
     if typ == "uniform":
         return UniformReplayBuffer(rcfg.capacity, obs_shape=obs_shape, device=device)
     elif typ == "per":
-        raise NotImplementedError("will do next")
+        return PrioritizedReplayBuffer(
+            rcfg.capacity,
+            obs_shape=obs_shape,
+            alpha=rcfg.alpha,
+            beta=rcfg.beta,
+            beta_anneal_steps=rcfg.beta_anneal_steps,
+            device=device,
+        )
     else:
         raise ValueError(f"Unknown replay type: {typ}")
