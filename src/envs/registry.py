@@ -10,7 +10,6 @@ def make_env(env_cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     Returns (env, eval_env, obs_adapter) where obs_adapter(obs) -> np.ndarray.
     """
     env_id = env_cfg.id
-
     if env_id == "FrozenLake-v1":
         env, eval_env, obs_adapter = make_frozenlake(env_cfg, seed)
     else:

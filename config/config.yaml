@@ -15,7 +15,7 @@ wandb:
   tags: ["baseline", "double-dqn", "frozenlake"]
 
 train:
-  total_steps: 200000
+  total_steps: 800000
   eval_interval_episodes: 25
   checkpoint_interval_episodes: 0
   save_dir: outputs/checkpoints
