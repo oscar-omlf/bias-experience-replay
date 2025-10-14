@@ -23,11 +23,11 @@ optimizer:
 
 # DQN / DDQN specifics
 gamma: 0.99
-handle_time_limit_as_terminal: false
+handle_time_limit_as_terminal: true
 train_freq: 1              # gradient step each env step
 learning_starts: 10000
 gradient_steps: 1
-max_grad_norm: 4.0
+max_grad_norm: 10.0
 
 target_update:
   interval: 1

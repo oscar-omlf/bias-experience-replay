@@ -27,14 +27,16 @@ gradient_steps: 1
 max_grad_norm: 10.0
 
 target_update:
-  interval: 250
+  interval: 1
   tau: 0.01
 
 # Network
 model:
   type: mlp
-  hidden_sizes: [128, 128]
   activation: relu
+  hidden_sizes: [128, 128]
+  conv_channels: [16, 32]
+  fc_hidden: 128
 
 # Logging and eVal
 log_interval_steps: 2000

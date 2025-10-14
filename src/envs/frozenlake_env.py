@@ -43,9 +43,8 @@ def make_frozenlake(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     env = RecordEpisodeStatistics(env)
     eval_env = RecordEpisodeStatistics(eval_env)
 
-    if getattr(cfg, "max_episode_steps", None):
-        env = TimeLimit(env, max_episode_steps=cfg.max_episode_steps)
-        eval_env = TimeLimit(eval_env, max_episode_steps=cfg.max_episode_steps)
+    env = TimeLimit(env, max_episode_steps=cfg.max_episode_steps)
+    eval_env = TimeLimit(eval_env, max_episode_steps=cfg.max_episode_steps)
 
     # Seed env RNGs and action spaces
     env.reset(seed=seed)

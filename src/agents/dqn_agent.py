@@ -7,7 +7,7 @@ import torch.optim as optim
 import wandb
 
 from src.replay import make_replay
-from src.models.q_network import QNetwork
+from src.models.factory import build_q_network
 from src.utils.schedules import LinearSchedule
 from src.utils.wandb_utils import log_metrics
 from src.algo.dqn import DoubleDQN
@@ -41,15 +41,20 @@ class DQNAgent:
 
         self.n_actions = action_space.n
 
+        self.model_type = str(self.cfg.agents.model.type)
+
         # Networks
-        hsizes = tuple(self.cfg.agents.model.hidden_sizes)
-        act = str(self.cfg.agents.model.activation)
-        self.q_net = QNetwork(self.input_dim, self.n_actions, hsizes, activation=act).to(self.device)
-        self.target_q_net = QNetwork(self.input_dim, self.n_actions, hsizes, activation=act).to(self.device)
+        self.q_net, info = build_q_network(self.cfg.agents.model, obs_space, self.n_actions)
+        self.q_net.to(self.device)
+
+        self.target_q_net, _ = build_q_network(self.cfg.agents.model, obs_space, self.n_actions)
+        self.target_q_net.to(self.device)
         self.target_q_net.load_state_dict(self.q_net.state_dict())
         self.target_q_net.eval()
 
-        print(f"[Init] obs_space={obs_space}, n_actions={self.n_actions}, input_dim={self.input_dim}")
+        self._mlp_input_dim = info.get("input_dim", None)
+
+        print(f"[Init] obs_space={obs_space}, n_actions={self.n_actions}, model={self.model_type}, info={info}")
 
         # Optimizer
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.cfg.agents.optimizer.lr, weight_decay=self.cfg.agents.optimizer.weight_decay)
@@ -83,10 +88,10 @@ class DQNAgent:
         x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
         if x.ndim == 1:
             x = x.unsqueeze(0)
-        # Assert exact feature match, hopefully find shape match error
-        assert x.shape[1] == self.input_dim, \
-            f"Encoded obs has dim {x.shape[1]}, expected {self.input_dim}. " \
-            f"Check adapter and env observation space."
+        elif x.ndim == 3:
+            x = x.unsqueeze(0)
+        if self.model_type == "mlp":
+            x = x.view(x.size(0), -1)
         return x
 
     @torch.no_grad()
