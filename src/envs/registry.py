@@ -13,7 +13,7 @@ def make_env(env_cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     env_id = env_cfg.id
     if env_id == "FrozenLake-v1":
         env, eval_env, obs_adapter = make_frozenlake(env_cfg, seed)
-    if env_id.startswith("MinAtar/"):
+    elif env_id.startswith("MinAtar/"):
         env, eval_env, obs_adapter = make_miniatar(env_cfg, seed)
     else:
         raise ValueError(f"Unsupported env id: {env_id}")
