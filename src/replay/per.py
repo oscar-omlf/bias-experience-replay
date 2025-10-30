@@ -1,5 +1,6 @@
-from typing import Dict
+from typing import Dict, Sequence, List
 import numpy as np
+from collections import defaultdict
 from .base import ReplayBuffer
 
 class SumTree:
@@ -53,16 +54,21 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.pos = 0
         self.full = False
         self.current_size = 0
-        self.step = 0  # For beta annealing
+        self.step = 0
+
         if isinstance(obs_shape, int):
             self.obs = np.zeros((capacity,), dtype=np.int64)
         else:
             self.obs = np.zeros((capacity,) + obs_shape, dtype=np.float32)
+
         self.next_obs = np.zeros_like(self.obs)
         self.actions = np.zeros((capacity,), dtype=np.int64)
         self.rewards = np.zeros((capacity,), dtype=np.float32)
         self.terminated = np.zeros((capacity,), dtype=np.float32)
         self.truncated = np.zeros((capacity,), dtype=np.float32)
+
+        self.by_sa = defaultdict(list)
+        self.idx_to_key = [None] * capacity
 
     def add(self, obs, action, reward, next_obs, terminated, truncated):
         self.obs[self.pos] = obs
@@ -71,6 +77,12 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.next_obs[self.pos] = next_obs
         self.terminated[self.pos] = float(terminated)
         self.truncated[self.pos] = float(truncated)
+
+        s_key = self.idx_to_key[self.obs[self.pos]]
+        key = (s_key, int(self.actions[self.pos]))
+        self.by_sa[key].append(self.pos)
+        self.idx_to_key[self.pos] = key
+        
         priority = self.max_priority ** self.alpha
         self.tree.add(priority)
         self.pos = (self.pos + 1) % self.capacity
@@ -109,6 +121,31 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             weights=weights,
         )
         return batch
+    
+    def sibling_groups(
+        self,
+        indices: Sequence[int],
+        include_self: bool,
+        min_group: int = 1,
+        max_group: int | None = None,
+    ) -> List[List[int]]:
+        groups = []
+        for idx in indices:
+            key = self.idx_to_key[idx]
+            if key is None:
+                groups.append([])
+                continue
+            lst = self.by_sa.get(key, [])
+            if include_self:
+                g = list(lst)
+            else:
+                g = [j for j in lst if j != idx]
+            if max_group and len(g) > max_group:
+                g = np.random.choice(g, size=max_group, replace=False).tolist()
+            if len(g) < min_group:
+                g = []  # caller will fallback to original idx
+            groups.append(g)
+        return groups
 
     def update_priorities(self, indices, priorities):
         for idx, prio in zip(indices, priorities):

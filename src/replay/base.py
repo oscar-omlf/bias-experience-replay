@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Sequence, List
 
 
 class ReplayBuffer(ABC):
@@ -17,4 +17,17 @@ class ReplayBuffer(ABC):
 
     def update_priorities(self, indices, priorities):
         # For PER
-        return
+        pass
+
+    def fetch(self, indices: Sequence[int]) -> Dict:
+        pass
+
+    def sibling_groups(
+            self,
+            indices: Sequence[int],
+            include_self: bool,
+            min_group: int,
+            max_group: int | None
+        ) -> List[List[int]]:
+        return [[] for _ in indices]
+

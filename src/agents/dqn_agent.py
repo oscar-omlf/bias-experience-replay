@@ -108,6 +108,11 @@ class DQNAgent:
     def _sample_batch(self) -> Dict[str, torch.Tensor]:
         batch = self.replay.sample(self.cfg.agents.replay.batch_size)
 
+        
+
+
+
+
         obs = torch.as_tensor(
             np.stack([self.obs_adapter(o) for o in batch["obs"]]),
             dtype=torch.float32, device=self.device

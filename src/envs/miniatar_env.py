@@ -3,6 +3,8 @@ import numpy as np
 import gymnasium as gym
 from gymnasium.wrappers import TimeLimit, RecordEpisodeStatistics
 
+import minatar
+
 class StickyAction(gym.Wrapper):
     def __init__(self, env, zeta: float = 0.25, seed: int | None = None):
         super().__init__(env)
@@ -22,10 +24,6 @@ class StickyAction(gym.Wrapper):
         return obs, rew, terminated, truncated, info
 
 def _obs_adapter_miniatar():
-    """
-    Return an adapter that converts HWC boolean/binary -> CHW float32 in [0,1].
-    Agent can later either keep CHW (cnn) or flatten (mlp).
-    """
     def adapt(obs):
         arr = np.asarray(obs)
         # Expected from MinAtar Gymnasium: (H, W, C) with bool/0-1
@@ -51,7 +49,6 @@ def make_miniatar(cfg, seed: int):
     env = TimeLimit(env, max_episode_steps=int(cfg.max_episode_steps))
     eval_env = TimeLimit(eval_env, max_episode_steps=int(cfg.max_episode_steps))
 
-    # Seed
     env.reset(seed=seed)
     eval_env.reset(seed=seed + 123)
     env.action_space.seed(seed)

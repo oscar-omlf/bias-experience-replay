@@ -10,6 +10,14 @@ replay:
   beta: 0.4
   beta_anneal_steps: 800000
 
+  sa_mitigation:
+    enabled: true
+    method: avg   # avg | other | none
+    include_self: false
+    min_group: 1
+    max_group: 64
+    update_all_siblings: true
+
 # Exploration
 epsilon:
   start: 1.0
