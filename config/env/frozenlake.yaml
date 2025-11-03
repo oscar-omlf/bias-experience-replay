@@ -1,5 +1,5 @@
 id: FrozenLake-v1
-is_slippery: false
+is_slippery: true
 map_name: "4x4" # 4x4 or 8x8
 max_episode_steps: 200
 render_mode: null # null | "human" | "ansi"

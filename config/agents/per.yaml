@@ -8,7 +8,7 @@ replay:
   eps: 1.0e-6
   alpha: 0.6
   beta: 0.4
-  beta_anneal_steps: 800000
+  beta_anneal_steps: 35000
 
   sa_mitigation:
     enabled: true
@@ -22,7 +22,7 @@ replay:
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 400000
+  decay_steps: 30000
 
 # Optimization
 optimizer:
@@ -35,7 +35,7 @@ handle_time_limit_as_terminal: true
 train_freq: 1              # gradient step each env step
 learning_starts: 10000
 gradient_steps: 1
-max_grad_norm: 10.0
+max_grad_norm: 4.0
 
 target_update:
   interval: 1
@@ -46,6 +46,8 @@ model:
   type: mlp
   hidden_sizes: [128, 128]
   activation: relu
+  conv_channels: [16, 32]
+  fc_hidden: 128
 
 # Logging and eVal
 log_interval_steps: 2000

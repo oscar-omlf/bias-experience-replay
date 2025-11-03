@@ -80,6 +80,8 @@ class DQNAgent:
         )
 
         self.global_step = 0
+        self.is_per = str(self.cfg.agents.replay.type).lower() == "per"
+        self.mit_cfg = getattr(self.cfg.agents.replay, "sa_mitigation", None)
 
         print(f"[Init] Loaded {self.cfg.agents.algo} agent with {self.cfg.agents.replay.type} replay.")
     
@@ -105,13 +107,99 @@ class DQNAgent:
         # Store raw obs (int for FrozenLake), though buffer handles types
         self.replay.add(o, a, r, no, terminated, truncated)
 
-    def _sample_batch(self) -> Dict[str, torch.Tensor]:
+    def _sample_batch(self) -> Dict[str, Any]:
         batch = self.replay.sample(self.cfg.agents.replay.batch_size)
 
-        
+        mit_cfg = self.mit_cfg
+        use_mitigation = (
+            self.is_per
+            and mit_cfg is not None
+            and bool(mit_cfg.enabled)
+        )
 
+        groups = None
+        if use_mitigation:
+            method = str(mit_cfg.method).lower()
+            include_self = bool(mit_cfg.include_self)
+            min_group = int(mit_cfg.min_group)
+            max_group = int(mit_cfg.max_group)
 
+            groups = self.replay.sibling_groups(
+                batch["indices"],
+                include_self=include_self,
+                min_group=min_group,
+                max_group=max_group,
+            )
 
+            if method == "other":
+                # Replace (next_obs, r, term, trunc) transition with another sibling (if exists)
+                repl_idx = []
+                for g, idx in zip(groups, batch["indices"]):
+                    if len(g) == 0:
+                        repl_idx.append(None)
+                    else:
+                        repl_idx.append(int(np.random.choice(g)))
+
+                chosen = [i for i in repl_idx if i is not None]
+                if len(chosen) > 0:
+                    fetched = self.replay.fetch(chosen)
+                    if fetched is None or "indices" not in fetched:
+                        # defensive fallback – skip replacement for this minibatch
+                        pass
+                    else:
+                        row_of = {int(i): k for k, i in enumerate(fetched["indices"])}
+                        for bi, alt_idx in enumerate(repl_idx):
+                            if alt_idx is None:
+                                continue
+                            k = row_of[int(alt_idx)]
+                            batch["next_obs"][bi]   = fetched["next_obs"][k]
+                            batch["rewards"][bi]    = fetched["rewards"][k]
+                            batch["terminated"][bi] = fetched["terminated"][k]
+                            batch["truncated"][bi]  = fetched["truncated"][k]
+
+            if method == "avg":
+                B = len(batch["indices"])
+                rewards_agg    = np.empty((B,), dtype=np.float32)
+                terminated_agg = np.empty((B,), dtype=np.float32)
+                truncated_agg  = np.empty((B,), dtype=np.float32)
+                avg_next_q     = np.empty((B,), dtype=np.float32)
+                done_agg       = np.empty((B,), dtype=np.float32)  # NEW
+
+                for i, (g, idx_i) in enumerate(zip(groups, batch["indices"])):
+                    if not g:
+                        g = [int(idx_i)]
+                    fetched = self.replay.fetch(g)
+
+                    term_j  = fetched["terminated"]
+                    trunc_j = fetched["truncated"]
+
+                    rewards_agg[i]    = float(np.mean(fetched["rewards"]))
+                    terminated_agg[i] = float(np.mean(term_j))
+                    truncated_agg[i]  = float(np.mean(trunc_j))
+
+                    if self.cfg.agents.handle_time_limit_as_terminal:
+                        done_agg[i] = float(np.maximum(term_j, trunc_j).mean())
+                    else:
+                        done_agg[i] = float(term_j.mean())
+
+                    next_list = [self.obs_adapter(o) for o in fetched["next_obs"]]
+                    x_next = torch.as_tensor(np.stack(next_list), dtype=torch.float32, device=self.device)
+                    if self.model_type == "mlp":
+                        x_next = x_next.view(x_next.size(0), -1)
+                    with torch.no_grad():
+                        q_online = self.q_net(x_next)
+                        a_star   = q_online.argmax(dim=1)
+                        q_tgt    = self.target_q_net(x_next)
+                        v_j      = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1)
+                        avg_next_q[i] = float(v_j.mean().item())
+
+                batch["rewards_agg"]    = rewards_agg
+                batch["terminated_agg"] = terminated_agg
+                batch["truncated_agg"]  = truncated_agg
+                batch["avg_next_q"]     = avg_next_q
+                batch["done_agg"]       = done_agg
+
+            batch["mitigation_groups"] = groups
 
         obs = torch.as_tensor(
             np.stack([self.obs_adapter(o) for o in batch["obs"]]),
@@ -126,8 +214,6 @@ class DQNAgent:
         terminated = torch.as_tensor(batch["terminated"], dtype=torch.float32, device=self.device)
         truncated = torch.as_tensor(batch["truncated"], dtype=torch.float32, device=self.device)
         
-        # dones = torch.as_tensor(batch["dones"], dtype=torch.float32, device=self.device)
-
         # This is to implement PER later
         weights = batch.get("weights", None)
         if weights is None:
@@ -137,11 +223,27 @@ class DQNAgent:
 
         indices = batch.get("indices", None)
         
-        return dict(
-            obs=obs, actions=actions, rewards=rewards, 
+        out = dict(
+            obs=obs, actions=actions, rewards=rewards,
             next_obs=next_obs, terminated=terminated, truncated=truncated,
             weights=weights, indices=indices
         )
+        
+        # new metrics for the bias mitigation technique
+        if groups is not None:
+            out["mitigation_groups"] = groups
+
+        # only write the torch versions of the aggregates
+        if "rewards_agg" in batch:
+            out["rewards_agg"]    = torch.as_tensor(batch["rewards_agg"],    dtype=torch.float32, device=self.device)
+            out["terminated_agg"] = torch.as_tensor(batch["terminated_agg"], dtype=torch.float32, device=self.device)
+            out["truncated_agg"]  = torch.as_tensor(batch["truncated_agg"],  dtype=torch.float32, device=self.device)
+        if "avg_next_q" in batch:
+            out["avg_next_q"]     = torch.as_tensor(batch["avg_next_q"],     dtype=torch.float32, device=self.device)
+        if "done_agg" in batch:
+            out["done_agg"] = torch.as_tensor(batch["done_agg"], dtype=torch.float32, device=self.device)
+
+        return out
 
     def _maybe_update_target(self):
         if self.global_step > 0 and (self.global_step % self.cfg.agents.target_update.interval == 0):
@@ -213,7 +315,33 @@ class DQNAgent:
                         eps_prio = self.cfg.agents.replay.eps
                         prios = td + eps_prio
 
-                        self.replay.update_priorities(batch["indices"], prios)
+
+                        mit_cfg = self.mit_cfg
+                        method = str(getattr(mit_cfg, "method", "none")).lower() if mit_cfg else "none"
+                        groups = batch.get("mitigation_groups", None)
+
+                        use_family = (
+                            self.is_per
+                            and mit_cfg is not None
+                            and getattr(mit_cfg, "enabled", False)
+                            and getattr(mit_cfg, "update_all_siblings", False)
+                            and method == "avg"
+                            and groups is not None
+                        )
+
+                        if use_family:
+                            idx_list, prio_list = [], []
+                            for i, idx in enumerate(batch["indices"]):
+                                # always include the sampled index
+                                idx_list.append(int(idx))
+                                prio_list.append(float(prios[i]))
+                                # then its siblings (groups[i] may exclude self)
+                                for sib in groups[i]:
+                                    idx_list.append(int(sib))
+                                    prio_list.append(float(prios[i]))
+                            self.replay.update_priorities(idx_list, prio_list)
+                        else:
+                            self.replay.update_priorities(batch["indices"], prios)
 
                     if self.global_step % self.cfg.agents.log_interval_steps == 0:
                         log_metrics({

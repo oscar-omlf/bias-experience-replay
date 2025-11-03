@@ -71,6 +71,15 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.idx_to_key = [None] * capacity
 
     def add(self, obs, action, reward, next_obs, terminated, truncated):
+        old_key = self.idx_to_key[self.pos]
+        if old_key is not None:
+            lst = self.by_sa.get(old_key, None)
+            if lst is not None:
+                try:
+                    lst.remove(self.pos)
+                except ValueError:
+                    pass
+
         self.obs[self.pos] = obs
         self.actions[self.pos] = action
         self.rewards[self.pos] = reward
@@ -78,13 +87,20 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.terminated[self.pos] = float(terminated)
         self.truncated[self.pos] = float(truncated)
 
-        s_key = self.idx_to_key[self.obs[self.pos]]
+        if self.obs.ndim == 1:
+            s_key = int(self.obs[self.pos])
+        else:
+            s_key = self.obs[self.pos].tobytes()
+
+        # s_key = self.idx_to_key[self.obs[self.pos]]
         key = (s_key, int(self.actions[self.pos]))
+
         self.by_sa[key].append(self.pos)
         self.idx_to_key[self.pos] = key
         
-        priority = self.max_priority ** self.alpha
+        priority = max(self.max_priority, 1e-6) ** self.alpha
         self.tree.add(priority)
+        
         self.pos = (self.pos + 1) % self.capacity
         if not self.full:
             self.current_size += 1
@@ -122,12 +138,24 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         )
         return batch
     
+    def fetch(self, indices: Sequence[int]) -> Dict:
+        idx = np.asarray(indices, dtype=np.int64)
+        return dict(
+            obs=self.obs[idx],
+            actions=self.actions[idx],
+            rewards=self.rewards[idx],
+            next_obs=self.next_obs[idx],
+            terminated=self.terminated[idx],
+            truncated=self.truncated[idx],
+            indices=idx,
+        )
+    
     def sibling_groups(
         self,
         indices: Sequence[int],
         include_self: bool,
-        min_group: int = 1,
-        max_group: int | None = None,
+        min_group: int,
+        max_group: int
     ) -> List[List[int]]:
         groups = []
         for idx in indices:
@@ -150,7 +178,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
     def update_priorities(self, indices, priorities):
         for idx, prio in zip(indices, priorities):
             self.max_priority = max(self.max_priority, prio)
-            prio = prio ** self.alpha
+            prio = max(prio, 1e-6) ** self.alpha
             self.tree.update(idx + self.capacity - 1, prio)
 
     def __len__(self) -> int:

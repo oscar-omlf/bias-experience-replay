@@ -27,7 +27,7 @@ class ReplayBuffer(ABC):
             indices: Sequence[int],
             include_self: bool,
             min_group: int,
-            max_group: int | None
+            max_group: int
         ) -> List[List[int]]:
         return [[] for _ in indices]
 

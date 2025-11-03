@@ -3,7 +3,10 @@ import numpy as np
 import gymnasium as gym
 from gymnasium.wrappers import TimeLimit, RecordEpisodeStatistics
 
-import minatar
+from minatar import gym as minatar_gym
+# import minatar
+
+minatar_gym.register_envs()
 
 class StickyAction(gym.Wrapper):
     def __init__(self, env, zeta: float = 0.25, seed: int | None = None):

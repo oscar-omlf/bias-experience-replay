@@ -23,8 +23,9 @@ class DoubleDQN:
 
         rewards_agg = batch.get("rewards_agg", None)
         avg_next_q = batch.get("avg_next_q", None)
-        term_agg = batch.get("term_agg", None)
-        trunc_agg = batch.get("trunc_agg", None)
+        term_agg = batch.get("terminated_agg", None)
+        trunc_agg = batch.get("truncated_agg", None)
+        done_agg = batch.get("done_agg", None)
 
         if weights is None:
             weights = torch.ones_like(rewards)
@@ -42,7 +43,9 @@ class DoubleDQN:
                 next_q_target = self.target_q_net(next_obs)
                 next_q = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
 
-            if term_agg is not None and trunc_agg is not None:
+            if done_agg is not None:
+                dones = done_agg
+            elif term_agg is not None and trunc_agg is not None:
                 dones = torch.maximum(term_agg, trunc_agg) if self.handle_time_limit_as_terminal else term_agg
             else:
                 dones = torch.maximum(terminated, truncated) if self.handle_time_limit_as_terminal else terminated
