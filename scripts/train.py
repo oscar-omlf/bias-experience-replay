@@ -41,6 +41,9 @@ def main(cfg: DictConfig):
         device=device,
     )
 
+    # Trying to use this to debug
+    agent.replay.set_debug_key(obs=6, action=1)
+
     # Train
     agent.train()
 

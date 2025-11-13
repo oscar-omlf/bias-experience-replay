@@ -118,6 +118,8 @@ class DQNAgent:
         )
 
         groups = None
+        group_sizes = None
+        
         if use_mitigation:
             method = str(mit_cfg.method).lower()
             include_self = bool(mit_cfg.include_self)
@@ -144,7 +146,6 @@ class DQNAgent:
                 if len(chosen) > 0:
                     fetched = self.replay.fetch(chosen)
                     if fetched is None or "indices" not in fetched:
-                        # defensive fallback – skip replacement for this minibatch
                         pass
                     else:
                         row_of = {int(i): k for k, i in enumerate(fetched["indices"])}
@@ -159,47 +160,48 @@ class DQNAgent:
 
             if method == "avg":
                 B = len(batch["indices"])
-                rewards_agg    = np.empty((B,), dtype=np.float32)
-                terminated_agg = np.empty((B,), dtype=np.float32)
-                truncated_agg  = np.empty((B,), dtype=np.float32)
-                avg_next_q     = np.empty((B,), dtype=np.float32)
-                done_agg       = np.empty((B,), dtype=np.float32)  # NEW
+                target_agg = np.empty((B,), dtype=np.float32)
+                gamma = float(self.cfg.agents.gamma)
 
                 for i, (g, idx_i) in enumerate(zip(groups, batch["indices"])):
+                    # If no siblings, fall back to the sampled index itself
                     if not g:
                         g = [int(idx_i)]
+
                     fetched = self.replay.fetch(g)
 
-                    term_j  = fetched["terminated"]
-                    trunc_j = fetched["truncated"]
-
-                    rewards_agg[i]    = float(np.mean(fetched["rewards"]))
-                    terminated_agg[i] = float(np.mean(term_j))
-                    truncated_agg[i]  = float(np.mean(trunc_j))
+                    rewards_j = fetched["rewards"].astype(np.float32)
+                    term_j    = fetched["terminated"].astype(np.float32)
+                    trunc_j   = fetched["truncated"].astype(np.float32)
 
                     if self.cfg.agents.handle_time_limit_as_terminal:
-                        done_agg[i] = float(np.maximum(term_j, trunc_j).mean())
+                        done_j = np.maximum(term_j, trunc_j)
                     else:
-                        done_agg[i] = float(term_j.mean())
+                        done_j = term_j
 
                     next_list = [self.obs_adapter(o) for o in fetched["next_obs"]]
-                    x_next = torch.as_tensor(np.stack(next_list), dtype=torch.float32, device=self.device)
+                    x_next = torch.as_tensor(
+                        np.stack(next_list),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    
                     if self.model_type == "mlp":
                         x_next = x_next.view(x_next.size(0), -1)
+
                     with torch.no_grad():
                         q_online = self.q_net(x_next)
-                        a_star   = q_online.argmax(dim=1)
-                        q_tgt    = self.target_q_net(x_next)
-                        v_j      = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1)
-                        avg_next_q[i] = float(v_j.mean().item())
+                        a_star = q_online.argmax(dim=1)
+                        q_tgt = self.target_q_net(x_next)
+                        v_j = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1).cpu().numpy()
 
-                batch["rewards_agg"]    = rewards_agg
-                batch["terminated_agg"] = terminated_agg
-                batch["truncated_agg"]  = truncated_agg
-                batch["avg_next_q"]     = avg_next_q
-                batch["done_agg"]       = done_agg
+                    targets_j = rewards_j + (1.0 - done_j) * gamma * v_j
+                    target_agg[i] = float(targets_j.mean())
+
+                batch["target_agg"] = target_agg
 
             batch["mitigation_groups"] = groups
+            group_sizes = np.array([len(g) for g in groups], dtype=np.int64)
 
         obs = torch.as_tensor(
             np.stack([self.obs_adapter(o) for o in batch["obs"]]),
@@ -232,16 +234,14 @@ class DQNAgent:
         # new metrics for the bias mitigation technique
         if groups is not None:
             out["mitigation_groups"] = groups
+            out["group_sizes"] = torch.as_tensor(
+                group_sizes, dtype=torch.float32, device=self.device
+            )
 
-        # only write the torch versions of the aggregates
-        if "rewards_agg" in batch:
-            out["rewards_agg"]    = torch.as_tensor(batch["rewards_agg"],    dtype=torch.float32, device=self.device)
-            out["terminated_agg"] = torch.as_tensor(batch["terminated_agg"], dtype=torch.float32, device=self.device)
-            out["truncated_agg"]  = torch.as_tensor(batch["truncated_agg"],  dtype=torch.float32, device=self.device)
-        if "avg_next_q" in batch:
-            out["avg_next_q"]     = torch.as_tensor(batch["avg_next_q"],     dtype=torch.float32, device=self.device)
-        if "done_agg" in batch:
-            out["done_agg"] = torch.as_tensor(batch["done_agg"], dtype=torch.float32, device=self.device)
+        if "target_agg" in batch:
+            out["target_agg"] = torch.as_tensor(
+                batch["target_agg"], dtype=torch.float32, device=self.device
+            )
 
         return out
 
@@ -315,7 +315,6 @@ class DQNAgent:
                         eps_prio = self.cfg.agents.replay.eps
                         prios = td + eps_prio
 
-
                         mit_cfg = self.mit_cfg
                         method = str(getattr(mit_cfg, "method", "none")).lower() if mit_cfg else "none"
                         groups = batch.get("mitigation_groups", None)
@@ -343,8 +342,9 @@ class DQNAgent:
                         else:
                             self.replay.update_priorities(batch["indices"], prios)
 
+                    # Logging
                     if self.global_step % self.cfg.agents.log_interval_steps == 0:
-                        log_metrics({
+                        metrics = {
                             "train/loss": float(logs["loss"]),
                             "train/td_error_mean": float(logs["td_error_mean"]),
                             "train/q_mean": float(logs["q_mean"]),
@@ -353,7 +353,31 @@ class DQNAgent:
                             "buffer/size": len(self.replay),
                             "optim/lr": float(self.optimizer.param_groups[0]["lr"]),
                             "env/step": self.global_step,
-                        }, step=self.global_step)
+                        }
+
+                        # Bias mitigation metrics
+                        group_sizes = batch.get("group_sizes", None)
+                        if group_sizes is not None:
+                            gs_np = group_sizes.detach().cpu().numpy()
+                            if gs_np.size > 0:
+                                metrics.update({
+                                    "mit/group_size_mean": float(gs_np.mean()),
+                                    "mit/group_size_max": float(gs_np.max()),
+                                    "mit/group_nonempty_frac": float((gs_np > 0).mean()),
+                                })
+
+                        log_metrics(metrics, step=self.global_step)
+
+                        # Bias mitigation for averaging
+                        debug = getattr(self.replay, "debug_snapshot", lambda: None)()
+                        if debug is not None:
+                            prios = debug.get("debug_priorities", [])
+                            if len(prios) > 0:
+                                log_metrics({
+                                    "mit/debug_group_size": debug["debug_group_size"],
+                                    "mit/debug_prio_mean": float(np.mean(prios)),
+                                    "mit/debug_prio_max": float(np.max(prios)),
+                                }, step=self.global_step)
                         
             # Target update
             self._maybe_update_target()

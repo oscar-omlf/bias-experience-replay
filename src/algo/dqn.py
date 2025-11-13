@@ -22,10 +22,7 @@ class DoubleDQN:
         weights = batch.get("weights", None)
 
         rewards_agg = batch.get("rewards_agg", None)
-        avg_next_q = batch.get("avg_next_q", None)
-        term_agg = batch.get("terminated_agg", None)
-        trunc_agg = batch.get("truncated_agg", None)
-        done_agg = batch.get("done_agg", None)
+        target_agg = batch.get("target_agg", None)
 
         if weights is None:
             weights = torch.ones_like(rewards)
@@ -35,23 +32,18 @@ class DoubleDQN:
         q_sa = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            if avg_next_q is not None:
-                next_q = avg_next_q
+            if target_agg is not None:
+                target = target_agg
             else:
                 next_q_online = self.q_net(next_obs)
                 next_actions = next_q_online.argmax(dim=1)
                 next_q_target = self.target_q_net(next_obs)
                 next_q = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
-
-            if done_agg is not None:
-                dones = done_agg
-            elif term_agg is not None and trunc_agg is not None:
-                dones = torch.maximum(term_agg, trunc_agg) if self.handle_time_limit_as_terminal else term_agg
-            else:
+            
                 dones = torch.maximum(terminated, truncated) if self.handle_time_limit_as_terminal else terminated
 
-            r = rewards_agg if rewards_agg is not None else rewards
-            target = r + (1.0 - dones) * self.gamma * next_q
+                r = rewards_agg if rewards_agg is not None else rewards
+                target = r + (1.0 - dones) * self.gamma * next_q
 
         # loss = F.smooth_l1_loss(q_sa, target)
         per_sample_loss = F.smooth_l1_loss(q_sa, target, reduction="none")

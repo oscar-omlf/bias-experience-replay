@@ -69,6 +69,27 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         self.by_sa = defaultdict(list)
         self.idx_to_key = [None] * capacity
+        self.debug_key = None
+    
+    def set_debug_key(self, obs, action):
+        if self.obs.ndim == 1:  # discrete
+            s_key = int(obs)
+        else:
+            s_key = np.array(obs).tobytes()
+        self.debug_key = (s_key, int(action))
+
+    def debug_snapshot(self):
+        if self.debug_key is None:
+            return None
+        lst = self.by_sa.get(self.debug_key, [])
+        if not lst:
+            return {"debug_group_size": 0}
+        prios = [float(self.tree.tree[i + self.capacity - 1]) for i in lst]
+        return {
+            "debug_group_size": len(lst),
+            "debug_indices": lst,
+            "debug_priorities": prios,
+        }
 
     def add(self, obs, action, reward, next_obs, terminated, truncated):
         old_key = self.idx_to_key[self.pos]
