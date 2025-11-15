@@ -17,8 +17,7 @@ def _select_device(device_str: str):
     return device_str
 
 
-@hydra.main(config_path="../config", config_name="config", version_base=None)
-def main(cfg: DictConfig):
+def run_training(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
     device = _select_device(cfg.device)
     print("Device:", device)
@@ -41,11 +40,15 @@ def main(cfg: DictConfig):
         device=device,
     )
 
-    # Trying to use this to debug
-    agent.replay.set_debug_key(obs=6, action=1)
+    if hasattr(agent.replay, "set_debug_key"):
+        agent.replay.set_debug_key(obs=6, action=1)
 
     # Train
     agent.train()
+
+    final_eval = agent.evaluate(episodes=cfg.agents.eval_episodes)
+
+    q_values = agent.compute_q_values_all_states()
 
     # Close
     env.close()
@@ -53,6 +56,21 @@ def main(cfg: DictConfig):
 
     if run is not None:
         run.finish()
+
+    summary = {
+        "final_eval": final_eval,
+        "total_steps": agent.global_step,
+        "episode_logs": getattr(agent, "episode_logs", []),
+        "step_logs": getattr(agent, "step_logs", []),
+        "eval_logs": getattr(agent, "eval_logs", []),
+        "q_values": q_values,
+    }
+    return summary
+
+
+@hydra.main(config_path="../config", config_name="config", version_base=None)
+def main(cfg: DictConfig):
+    _ = run_training(cfg)
 
 
 if __name__ == "__main__":

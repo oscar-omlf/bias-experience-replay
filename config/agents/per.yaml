@@ -2,7 +2,7 @@ algo: dqn
 
 # Replay / sampling
 replay:
-  type: per      # Changed to per
+  type: per
   capacity: 200000
   batch_size: 128
   eps: 1.0e-6
@@ -13,7 +13,7 @@ replay:
   sa_mitigation:
     enabled: true
     method: avg   # avg | other | none
-    include_self: false
+    include_self: true
     min_group: 1
     max_group: 64
     update_all_siblings: true
@@ -22,7 +22,7 @@ replay:
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 30000
+  decay_steps: 130000
 
 # Optimization
 optimizer:

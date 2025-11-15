@@ -29,6 +29,10 @@ class DQNAgent:
         self.device = device
         self.target_updates = 0
 
+        self.step_logs = []
+        self.episode_logs = []
+        self.eval_logs = []
+
         obs_space = env.observation_space
         action_space = env.action_space
         assert hasattr(action_space, "n"), "This baseline expects a discrete action space."
@@ -281,6 +285,12 @@ class DQNAgent:
             "eval/episode_length": float(np.mean(lengths)),
         }
         log_metrics(metrics, step=self.global_step)
+
+        self.eval_logs.append({
+            "step": int(self.global_step),
+            **metrics,
+        })
+
         return metrics
 
     def train(self):
@@ -366,31 +376,60 @@ class DQNAgent:
                                     "mit/group_nonempty_frac": float((gs_np > 0).mean()),
                                 })
 
+                        if "td_errors" in logs:
+                            td = logs["td_errors"].detach().cpu().numpy()
+                            metrics["train/td_error_std"] = float(np.std(td))
+                            metrics["train/td_error_max_abs"] = float(np.max(np.abs(td)))
+
+                            if wandb.run is not None:
+                                metrics["train/td_error_hist"] = wandb.Histogram(td)
+
                         log_metrics(metrics, step=self.global_step)
+
+                        self.step_logs.append({
+                            "step": int(self.global_step),
+                            **{
+                                k: (float(v) if isinstance(v, (int, float, np.floating)) else v)
+                                for k, v in metrics.items()
+                                if not isinstance(v, wandb.Histogram)
+                            },
+                        })
 
                         # Bias mitigation for averaging
                         debug = getattr(self.replay, "debug_snapshot", lambda: None)()
                         if debug is not None:
                             prios = debug.get("debug_priorities", [])
                             if len(prios) > 0:
-                                log_metrics({
+                                debug_metrics = {
                                     "mit/debug_group_size": debug["debug_group_size"],
                                     "mit/debug_prio_mean": float(np.mean(prios)),
                                     "mit/debug_prio_max": float(np.max(prios)),
-                                }, step=self.global_step)
+                                }
+                                log_metrics(debug_metrics, step=self.global_step)
+
+                                # Last step_logs entry
+                                self.step_logs[-1].update(debug_metrics)
                         
             # Target update
             self._maybe_update_target()
 
             # Episode end
             if d:
-                log_metrics({
+                ep_metrics = {
                     "train/episode_return": ep_stats.reward_sum,
                     "train/episode_length": ep_stats.length,
                     "train/episode_success": ep_stats.success,
                     "train/epsilon": float(epsilon),
                     "buffer/size": len(self.replay),
-                }, step=self.global_step)
+                }
+                log_metrics(ep_metrics, step=self.global_step)
+
+                # Store episode-level metrics locally
+                self.episode_logs.append({
+                    "episode": int(ep),
+                    "step": int(self.global_step),
+                    **ep_metrics,
+                })
 
                 ep += 1
                 # Periodic eval
@@ -400,3 +439,19 @@ class DQNAgent:
                 # Reset episode
                 o, _ = self.env.reset()
                 ep_stats = EpisodeStats()
+
+    @torch.no_grad()
+    def compute_q_values_all_states(self) -> np.ndarray:
+        """
+        For discrete-state envs like FrozenLake:
+        returns an array of shape [n_states, n_actions] with Q(s, ·).
+        """
+        obs_space = self.env.observation_space
+        n_states = obs_space.n
+        q_table = np.zeros((n_states, self.n_actions), dtype=np.float32)
+
+        for s in range(n_states):
+            x = self._encode_obs(s)  # uses obs_adapter internally
+            q = self.q_net(x).detach().cpu().numpy()[0]
+            q_table[s] = q
+        return q_table
