@@ -7,6 +7,13 @@ def setup_wandb(cfg, config_dict=None):
         return None
     
     env_name = "FrozenLake"
+    env_id = cfg.env.id
+    map_name = getattr(cfg.env, "map_name", None)
+    if map_name:
+        env_name = f"{env_id}-{map_name}"
+    else:
+        env_name = env_id
+
     replay = cfg.agents.replay.type
     seed = cfg.seed
 

@@ -37,6 +37,15 @@ AGENT_VARIANTS = {
             "agents.replay.sa_mitigation.update_all_siblings=true",
         ],
     },
+    "per_model": {
+        "label": "PER+Model",
+        "overrides": [
+            "agents=per",
+            "agents.replay.sa_mitigation.enabled=true",
+            "agents.replay.sa_mitigation.method=model",
+            "agents.replay.sa_mitigation.update_all_siblings=false",
+        ],
+    },
 }
 
 
@@ -104,15 +113,22 @@ def run_single_seed(
         seed=seed,
     )
 
-    # W^B settings for this experiment
+    env_id = cfg.env.id
+    map_name = getattr(cfg.env, "map_name", None)
+    if map_name:
+        env_key = f"{env_id}-{map_name}"
+    else:
+        env_key = env_id
+
+    # W&B settings for this experiment
     cfg.wandb.project = "PER-Bias-Mitigation"
     cfg.wandb.job_type = "training"
-    cfg.wandb.group = "FrozenLake-8x8"
+    cfg.wandb.group = env_key
 
     summary = run_training(cfg)
 
-    # Build result directory: results/AGENT_NAME/seed_XX/
-    agent_dir = os.path.join(results_root, agent_key)
+    # Build result directory: results/<env_key>/<agent_key>/seed_XX/
+    agent_dir = os.path.join(results_root, env_key, agent_key)
     seed_dir = os.path.join(agent_dir, f"seed_{seed:02d}")
     ensure_dir(seed_dir)
 
@@ -164,6 +180,7 @@ def run_single_seed(
     seed_summary = {
         "agent_key": agent_key,
         "agent_label": agent_label,
+        "env_key": env_key,
         "seed": seed,
         "total_steps": int(summary.get("total_steps", 0)),
         "final_eval": final_eval,
@@ -196,6 +213,12 @@ def run_multi_seed(
         )
         all_seed_summaries.append(s_sum)
 
+    if not all_seed_summaries:
+        return
+
+    # All runs should share the same env. take from the first
+    env_key = all_seed_summaries[0].get("env_key", "env")
+
     # Cross-seed summary
     success_list = []
     return_list = []
@@ -206,10 +229,11 @@ def run_multi_seed(
         if "eval/return_mean" in fe:
             return_list.append(float(fe["eval/return_mean"]))
 
-    agent_dir = os.path.join(results_root, agent_key)
+    agent_dir = os.path.join(results_root, env_key, agent_key)
     ensure_dir(agent_dir)
 
     cross_summary = {
+        "env_key": env_key,
         "agent_key": agent_key,
         "agent_label": AGENT_VARIANTS[agent_key]["label"],
         "seeds": [int(s["seed"]) for s in all_seed_summaries],

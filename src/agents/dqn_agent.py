@@ -8,6 +8,7 @@ import wandb
 
 from src.replay import make_replay
 from src.models.factory import build_q_network
+from src.models.tabular_model import TabularDynamicsModel
 from src.utils.schedules import LinearSchedule
 from src.utils.wandb_utils import log_metrics
 from src.algo.dqn import DoubleDQN
@@ -88,6 +89,19 @@ class DQNAgent:
         self.mit_cfg = getattr(self.cfg.agents.replay, "sa_mitigation", None)
 
         print(f"[Init] Loaded {self.cfg.agents.algo} agent with {self.cfg.agents.replay.type} replay.")
+
+        self.env_model = None
+        if self.is_per and self.mit_cfg is not None and bool(self.mit_cfg.enabled):
+            method = str(self.mit_cfg.method).lower()
+            if method == "model":
+                if not hasattr(obs_space, "n") or not hasattr(action_space, "n"):
+                    raise ValueError("We need a discrete observation and action space.")
+                self.env_model = TabularDynamicsModel(
+                    n_states=obs_space.n,
+                    n_actions=action_space.n,
+                )
+                print("[Init] TabularDynamicsModel initialized for model-based PER mitigation.")
+
     
     def _encode_obs(self, obs):
         x = self.obs_adapter(obs)
@@ -111,6 +125,26 @@ class DQNAgent:
         # Store raw obs (int for FrozenLake), though buffer handles types
         self.replay.add(o, a, r, no, terminated, truncated)
 
+        if self.env_model is not None:
+            s_arr = np.asarray(o)
+            s_next_arr = np.asarray(no)
+
+            if s_arr.ndim != 0 or s_next_arr.ndim != 0:
+                raise ValueError(f"TabularDynamicsModel expects scalar discrete observations, not {s_arr.shape} and {s_next_arr.shape}.")
+
+            s = int(s_arr.reshape(()))
+            s_next = int(s_next_arr.reshape(()))
+
+            self.env_model.observe(
+                s=s,
+                a=int(a),
+                r=float(r),
+                s_next=s_next,
+                terminated=terminated,
+                truncated=truncated,
+            )
+
+
     def _sample_batch(self) -> Dict[str, Any]:
         batch = self.replay.sample(self.cfg.agents.replay.batch_size)
 
@@ -126,16 +160,18 @@ class DQNAgent:
         
         if use_mitigation:
             method = str(mit_cfg.method).lower()
-            include_self = bool(mit_cfg.include_self)
-            min_group = int(mit_cfg.min_group)
-            max_group = int(mit_cfg.max_group)
+            
+            if method in ("avg", "other"):
+                include_self = bool(mit_cfg.include_self)
+                min_group = int(mit_cfg.min_group)
+                max_group = int(mit_cfg.max_group)
 
-            groups = self.replay.sibling_groups(
-                batch["indices"],
-                include_self=include_self,
-                min_group=min_group,
-                max_group=max_group,
-            )
+                groups = self.replay.sibling_groups(
+                    batch["indices"],
+                    include_self=include_self,
+                    min_group=min_group,
+                    max_group=max_group,
+                )
 
             if method == "other":
                 # Replace (next_obs, r, term, trunc) transition with another sibling (if exists)
@@ -157,12 +193,12 @@ class DQNAgent:
                             if alt_idx is None:
                                 continue
                             k = row_of[int(alt_idx)]
-                            batch["next_obs"][bi]   = fetched["next_obs"][k]
-                            batch["rewards"][bi]    = fetched["rewards"][k]
+                            batch["next_obs"][bi] = fetched["next_obs"][k]
+                            batch["rewards"][bi] = fetched["rewards"][k]
                             batch["terminated"][bi] = fetched["terminated"][k]
-                            batch["truncated"][bi]  = fetched["truncated"][k]
+                            batch["truncated"][bi] = fetched["truncated"][k]
 
-            if method == "avg":
+            elif method == "avg":
                 B = len(batch["indices"])
                 target_agg = np.empty((B,), dtype=np.float32)
                 gamma = float(self.cfg.agents.gamma)
@@ -204,8 +240,33 @@ class DQNAgent:
 
                 batch["target_agg"] = target_agg
 
-            batch["mitigation_groups"] = groups
-            group_sizes = np.array([len(g) for g in groups], dtype=np.int64)
+            elif method == "model":
+                for bi, (s_raw, a_raw) in enumerate(zip(batch["obs"], batch["actions"])):
+                    s_arr = np.asarray(s_raw)
+                    s = int(s_arr.reshape(()))
+                    a = int(a_raw)
+
+                    default = (
+                        batch["next_obs"][bi],
+                        batch["rewards"][bi],
+                        batch["terminated"][bi],
+                        batch["truncated"][bi],
+                    )
+
+                    s_next, r_new, term_new, trunc_new = self.env_model.sample(
+                        s=s,
+                        a=a,
+                        default=default,
+                    )
+
+                    batch["next_obs"][bi]   = s_next
+                    batch["rewards"][bi]    = r_new
+                    batch["terminated"][bi] = term_new
+                    batch["truncated"][bi]  = trunc_new
+
+            if groups is not None:
+                batch["mitigation_groups"] = groups
+                group_sizes = np.array([len(g) for g in groups], dtype=np.int64)
 
         obs = torch.as_tensor(
             np.stack([self.obs_adapter(o) for o in batch["obs"]]),
@@ -226,6 +287,8 @@ class DQNAgent:
             weights = torch.ones((obs.shape[0],), dtype=torch.float32, device=self.device)
         else:
             weights = torch.as_tensor(weights, dtype=torch.float32, device=self.device)
+            if weights.ndim > 1:
+                weights = weights.view(-1)
 
         indices = batch.get("indices", None)
         
