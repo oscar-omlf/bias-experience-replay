@@ -211,5 +211,7 @@ __marimo__/
 
 wandb/
 outputs/
+results/
 
 commit.txt
+*.zip
