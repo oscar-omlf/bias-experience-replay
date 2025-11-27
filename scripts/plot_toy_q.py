@@ -1,4 +1,3 @@
-# scripts/plot_toy_q_v.py
 import argparse
 import os
 from typing import List, Tuple
@@ -65,16 +64,18 @@ def compute_values(q_values: np.ndarray) -> np.ndarray:
     return q_values.max(axis=1)
 
 
-STATE_NAMES = [
-    "S0(start)",
-    "S1",
-    "S2",
-    "S3",
-    "S4",
-    "R(risky)",
-    "G(goal)",
-    "H(hole)",
-]
+def make_state_names(n_states: int) -> List[str]:
+    if n_states < 4:
+        # Fallback: just s0, s1, ...
+        return [f"s{i}" for i in range(n_states)]
+
+    # 1 (S0) + K (safe) + 3 (R,G,H) = n_states  =>  K = n_states - 4
+    safe_chain_len = n_states - 4
+    names = ["S0(start)"]
+    names += [f"S{i}" for i in range(1, safe_chain_len + 1)]
+    names += ["R(risky)", "G(goal)", "H(hole)"]
+    return names
+
 
 ACTION_NAMES = [
     "a0 (safe/cont)",
@@ -88,15 +89,13 @@ def plot_v_bar(values: np.ndarray, out_path: str, title: str):
     """
     n_states = values.shape[0]
     x = np.arange(n_states)
+    state_names = make_state_names(n_states)
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.bar(x, values, align="center")
 
     ax.set_xticks(x)
-    if len(STATE_NAMES) >= n_states:
-        ax.set_xticklabels(STATE_NAMES[:n_states], rotation=45, ha="right")
-    else:
-        ax.set_xticklabels([f"s{i}" for i in range(n_states)], rotation=45, ha="right")
+    ax.set_xticklabels(state_names, rotation=45, ha="right")
 
     ax.set_ylabel("V(s) = max_a Q(s,a)")
     ax.set_title(title)
@@ -118,18 +117,17 @@ def plot_q_bar(q_values: np.ndarray, out_path: str, title: str):
     n_states, n_actions = q_values.shape
     x = np.arange(n_states)
     width = 0.35 if n_actions == 2 else 0.8 / max(n_actions, 1)
+    state_names = make_state_names(n_states)
 
     fig, ax = plt.subplots(figsize=(8, 4))
 
     for a in range(n_actions):
         offset = (a - (n_actions - 1) / 2.0) * width
-        ax.bar(x + offset, q_values[:, a], width, label=ACTION_NAMES[a] if a < len(ACTION_NAMES) else f"a{a}")
+        label = ACTION_NAMES[a] if a < len(ACTION_NAMES) else f"a{a}"
+        ax.bar(x + offset, q_values[:, a], width, label=label)
 
     ax.set_xticks(x)
-    if len(STATE_NAMES) >= n_states:
-        ax.set_xticklabels(STATE_NAMES[:n_states], rotation=45, ha="right")
-    else:
-        ax.set_xticklabels([f"s{i}" for i in range(n_states)], rotation=45, ha="right")
+    ax.set_xticklabels(state_names, rotation=45, ha="right")
 
     ax.set_ylabel("Q(s,a)")
     ax.set_title(title)

@@ -1,4 +1,3 @@
-# scripts/plot_q_tables.py
 import argparse
 import os
 from typing import List, Tuple

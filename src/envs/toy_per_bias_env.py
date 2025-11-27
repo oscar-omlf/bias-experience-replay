@@ -40,27 +40,39 @@ class ToyPERBiasEnv(gym.Env):
 
     def __init__(
             self, 
-            p_success: float = 0.1, r_high: float = 5.0, render_mode=None):
+            p_success: float = 0.1,
+            r_high: float = 5.0, 
+            safe_chain_len: int = 4,
+            render_mode=None
+        ):
         super().__init__()
         self.p_success = float(p_success)
         self.r_high = float(r_high)
-
+        self.safe_chain_len = int(safe_chain_len)
         self.render_mode = render_mode
 
-        # States: S0, S1, S2, S3, S4, R, G, H
+        self.S0 = 0
+        self.S_safe_start = 1
+        self.S_safe_end = self.safe_start + self.safe_chain_len - 1
+        self.R = self.S_safe_end + 1
+        self.G = self.R + 1
+        self.H = self.G + 1
+
+        self.n_states = self.H + 1
+
+        # States: S0, S1, ..., S(N-1), R, G, H
         self.observation_space = spaces.Discrete(8)
         # Actions: 0 = safe, 1 = risky (ignored except at S0)
         self.action_space = spaces.Discrete(2)
 
-        self.state = 0
+        self.state = self.S0
         self.np_random, _ = seeding.np_random(None)
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:
             self.np_random, _ = seeding.np_random(seed)
-        self.state = 0  # S0
-        info = {}
-        return self.state, info
+        self.state = self.S0  # S0
+        return self.state, {}
 
     def step(self, action):
         assert self.action_space.contains(action), f"Invalid action {action}"
@@ -69,51 +81,44 @@ class ToyPERBiasEnv(gym.Env):
         truncated = False
         reward = 0.0
 
-        S0, S1, S2, S3, S4, R, G, H = range(8)
-
-        # If already terminal, stay there (wrappers shouldn't call step after done,
-        # but handle gracefully in case)
-        if s in (G, H):
+        if s in (self.G, self.H):
             return s, 0.0, True, False, {}
 
-        if s == S0:
+        if s == self.S0:
             # Choose safe vs risky
             if action == 0:
-                ns = S1
-                reward = 0.0
+                ns = self.S_safe_start
             else:
-                ns = R
-                reward = 0.0
+                ns = self.R
 
-        elif s in (S1, S2, S3):
+        elif s in self.S_safe_start <= s < self.S_safe_end:
             # Deterministic safe chain with delayed reward at the end
             ns = s + 1
 
-        elif s == S4:
-            ns = G
+        elif s == self.S_safe_end:
+            ns = self.G
             reward = 1.0
             terminated = True
 
-        elif s == R:
+        elif s == self.R:
             # Stochastic risky outcome with big rare reward
             if self.np_random.random() < self.p_success:
-                ns = G
+                ns = self.G
                 reward = self.r_high
             else:
-                ns = H
+                ns = self.H
                 reward = 0.0
             terminated = True
 
         else:
-            # Should not happen, but be safe
+            # Should not happen
             ns = s
 
-        if ns in (G, H):
+        if ns in (self.G, self.H):
             terminated = True
 
         self.state = ns
-        info = {}
-        return ns, float(reward), terminated, truncated, info
+        return ns, float(reward), terminated, truncated, {}
 
     def render(self):
         S0, S1, S2, S3, S4, R, G, H = range(8)
@@ -134,18 +139,17 @@ class ToyPERBiasEnv(gym.Env):
 
 
 def make_toy_per_bias(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
-    """
-    Factory matching your make_frozenlake signature:
-      returns (env, eval_env, obs_adapter)
-    """
+    safe_chain_len = int(getattr(cfg, "safe_chain_len", 8))
     env = ToyPERBiasEnv(
         p_success=getattr(cfg, "p_success", 0.1),
         r_high=getattr(cfg, "r_high", 5.0),
+        safe_chain_len=safe_chain_len,
         render_mode=getattr(cfg, "render_mode", None),
     )
     eval_env = ToyPERBiasEnv(
         p_success=getattr(cfg, "p_success", 0.1),
         r_high=getattr(cfg, "r_high", 5.0),
+        safe_chain_len=safe_chain_len,
         render_mode=getattr(cfg, "render_mode", None),
     )
 
