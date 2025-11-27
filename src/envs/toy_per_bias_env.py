@@ -12,7 +12,7 @@ class ToyPERBiasEnv(gym.Env):
     """
     Toy MDP to study PER bias.
 
-    States (Discrete(8)):
+    States (Discrete(n)):
       0: S0 (start)
       1: S1 (safe chain)
       2: S2
@@ -53,7 +53,7 @@ class ToyPERBiasEnv(gym.Env):
 
         self.S0 = 0
         self.S_safe_start = 1
-        self.S_safe_end = self.safe_start + self.safe_chain_len - 1
+        self.S_safe_end = self.S_safe_start + self.safe_chain_len - 1
         self.R = self.S_safe_end + 1
         self.G = self.R + 1
         self.H = self.G + 1
@@ -61,7 +61,7 @@ class ToyPERBiasEnv(gym.Env):
         self.n_states = self.H + 1
 
         # States: S0, S1, ..., S(N-1), R, G, H
-        self.observation_space = spaces.Discrete(8)
+        self.observation_space = spaces.Discrete(self.n_states)
         # Actions: 0 = safe, 1 = risky (ignored except at S0)
         self.action_space = spaces.Discrete(2)
 
@@ -91,7 +91,7 @@ class ToyPERBiasEnv(gym.Env):
             else:
                 ns = self.R
 
-        elif s in self.S_safe_start <= s < self.S_safe_end:
+        elif self.S_safe_start <= s < self.S_safe_end:
             # Deterministic safe chain with delayed reward at the end
             ns = s + 1
 
@@ -121,17 +121,14 @@ class ToyPERBiasEnv(gym.Env):
         return ns, float(reward), terminated, truncated, {}
 
     def render(self):
-        S0, S1, S2, S3, S4, R, G, H = range(8)
-        names = {
-            S0: "S0(start)",
-            S1: "S1",
-            S2: "S2",
-            S3: "S3",
-            S4: "S4",
-            R:  "R(risky)",
-            G:  "G(goal)",
-            H:  "H(hole)",
-        }
+        names = {self.S0: "S0(start)"}
+        # Safe chain states
+        for s in range(self.S_safe_start, self.S_safe_end + 1):
+            names[s] = f"S{s}"
+        names[self.R] = "R(risky)"
+        names[self.G] = "G(goal)"
+        names[self.H] = "H(hole)"
+
         print(f"State: {names.get(self.state, self.state)}")
 
     def close(self):
