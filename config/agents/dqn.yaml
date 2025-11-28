@@ -6,12 +6,15 @@ replay:
   capacity: 5000
   batch_size: 32
   eps: 1.0e-6
+  sa_mitigation:
+    enabled: false
+    method: dqn
 
 # Exploration
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 2000
+  decay_steps: 15000
 
 # Optimization
 optimizer:

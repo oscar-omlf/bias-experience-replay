@@ -12,11 +12,18 @@ from src.utils.seed import set_global_seeds
 
 
 AGENT_VARIANTS = {
+    "dqn": {
+        "label": "DQN",
+        "overrides": [
+            "agents=dqn",
+        ],
+    },
     "per": {
         "label": "PER",
         "overrides": [
             "agents=per",
             "agents.replay.sa_mitigation.enabled=false",
+            "agents.replay.sa_mitigation.method=none",
         ],
     },
     "per_sib_sample": {
@@ -113,6 +120,11 @@ def run_single_seed(
         seed=seed,
     )
 
+    new_agent_key = agent_key
+    if agent_key == "per_sib_avg":
+        max_group = cfg.agents.replay.sa_mitigation.max_group
+        new_agent_key = f"{agent_key}_g{max_group}"
+
     env_id = cfg.env.id
     map_name = getattr(cfg.env, "map_name", None)
     if map_name:
@@ -128,7 +140,7 @@ def run_single_seed(
     summary = run_training(cfg)
 
     # Build result directory: results/<env_key>/<agent_key>/seed_XX/
-    agent_dir = os.path.join(results_root, env_key, agent_key)
+    agent_dir = os.path.join(results_root, env_key, new_agent_key)
     seed_dir = os.path.join(agent_dir, f"seed_{seed:02d}")
     ensure_dir(seed_dir)
 
@@ -178,7 +190,7 @@ def run_single_seed(
     # Per-seed summary
     final_eval = summary.get("final_eval", {})
     seed_summary = {
-        "agent_key": agent_key,
+        "agent_key": new_agent_key,
         "agent_label": agent_label,
         "env_key": env_key,
         "seed": seed,
@@ -229,12 +241,13 @@ def run_multi_seed(
         if "eval/return_mean" in fe:
             return_list.append(float(fe["eval/return_mean"]))
 
-    agent_dir = os.path.join(results_root, env_key, agent_key)
+    agent_key_for_dir = all_seed_summaries[0].get("agent_key", agent_key)
+    agent_dir = os.path.join(results_root, env_key, agent_key_for_dir)
     ensure_dir(agent_dir)
 
     cross_summary = {
         "env_key": env_key,
-        "agent_key": agent_key,
+        "agent_key": agent_key_for_dir,
         "agent_label": AGENT_VARIANTS[agent_key]["label"],
         "seeds": [int(s["seed"]) for s in all_seed_summaries],
         "n_seeds": len(all_seed_summaries),

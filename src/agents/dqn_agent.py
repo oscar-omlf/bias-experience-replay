@@ -144,7 +144,6 @@ class DQNAgent:
                 truncated=truncated,
             )
 
-
     def _sample_batch(self) -> Dict[str, Any]:
         batch = self.replay.sample(self.cfg.agents.replay.batch_size)
 
@@ -200,11 +199,17 @@ class DQNAgent:
 
             elif method == "avg":
                 B = len(batch["indices"])
-                target_agg = np.empty((B,), dtype=np.float32)
                 gamma = float(self.cfg.agents.gamma)
 
+                all_next_obs = []
+                group_slices = []
+                all_rewards = []
+                all_done = []
+
+                total_siblings = 0
+                target_var_list = []
+
                 for i, (g, idx_i) in enumerate(zip(groups, batch["indices"])):
-                    # If no siblings, fall back to the sampled index itself
                     if not g:
                         g = [int(idx_i)]
 
@@ -220,25 +225,148 @@ class DQNAgent:
                         done_j = term_j
 
                     next_list = [self.obs_adapter(o) for o in fetched["next_obs"]]
-                    x_next = torch.as_tensor(
+
+                    start = len(all_next_obs)
+                    all_next_obs.extend(next_list)
+                    end = len(all_next_obs)
+
+                    group_slices.append((start, end))
+                    all_rewards.append(rewards_j)
+                    all_done.append(done_j)
+                    total_siblings += (end - start)
+
+                # Single forward pass over all sibling next states
+                if len(all_next_obs) > 0:
+                    x_next_all = torch.as_tensor(
+                        np.stack(all_next_obs),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    if self.model_type == "mlp":
+                        x_next_all = x_next_all.view(x_next_all.size(0), -1)
+
+                    with torch.no_grad():
+                        q_online_all = self.q_net(x_next_all)
+                        a_star_all = q_online_all.argmax(dim=1)
+                        q_tgt_all = self.target_q_net(x_next_all)
+                        v_all = q_tgt_all.gather(
+                            1, a_star_all.unsqueeze(1)
+                        ).squeeze(1).cpu().numpy()
+                else:
+                    v_all = np.array([], dtype=np.float32)
+
+                # Now compute per-group averaged targets using v_all
+                target_agg = np.empty((B,), dtype=np.float32)
+
+                for i, (start, end) in enumerate(group_slices):
+                    if end == start:
+                        # should not happen
+                        target_agg[i] = 0.0
+                        target_var_list.append(0.0)
+                        continue
+
+                    rewards_j = all_rewards[i]
+                    done_j = all_done[i]
+                    v_j = v_all[start:end]
+
+                    targets_j = rewards_j + (1.0 - done_j) * gamma * v_j
+                    m = float(targets_j.mean())
+                    target_agg[i] = m
+
+                    # Per-group variance of targets
+                    target_var_list.append(float(np.var(targets_j)))
+
+                batch["target_agg"] = target_agg
+                # Some summary stats we can log later
+                batch["mit_effective_batch_size"] = float(total_siblings)
+                if target_var_list:
+                    batch["mit_target_var_mean"] = float(np.mean(target_var_list))
+                    batch["mit_target_var_max"] = float(np.max(target_var_list))
+                else:
+                    batch["mit_target_var_mean"] = 0.0
+                    batch["mit_target_var_max"] = 0.0
+
+            elif method == "avg":
+                B = len(batch["indices"])
+                gamma = float(self.cfg.agents.gamma)
+
+                all_indices = []
+                group_slices = []
+
+                for idx_i, g in zip(batch["indices"], groups):
+                    if not g:
+                        g = [int(idx_i)]
+
+                    start = len(all_indices)
+                    all_indices.extend(g)
+                    end = len(all_indices)
+                    group_slices.append((start, end))
+
+                if len(all_indices) == 0:
+                    print("[DQNAgent] Empty group list, shouldn't happen...")
+                    batch["target_agg"] = np.zeros((B,), dtype=np.float32)
+                    batch["mit_effective_batch_size"] = 0.0
+                    batch["mit_target_var_mean"] = 0.0
+                    batch["mit_target_var_max"] = 0.0
+                else:
+                    all_indices_arr = np.asarray(all_indices, dtype=np.int64)
+
+                    fetched_all = self.replay.fetch(all_indices_arr)
+                    rewards_all = fetched_all["rewards"].astype(np.float32)
+                    term_all = fetched_all["terminated"].astype(np.float32)
+                    trunc_all = fetched_all["truncated"].astype(np.float32)
+
+                    if self.cfg.agents.handle_time_limit_as_terminal:
+                        done_all = np.maximum(term_all, trunc_all)
+                    else:
+                        done_all = term_all
+
+                    next_obs_all_raw = fetched_all["next_obs"]
+                    next_list = [self.obs_adapter(o) for o in next_obs_all_raw]
+
+                    x_next_all = torch.as_tensor(
                         np.stack(next_list),
                         dtype=torch.float32,
                         device=self.device,
                     )
-                    
                     if self.model_type == "mlp":
-                        x_next = x_next.view(x_next.size(0), -1)
+                        x_next_all = x_next_all.view(x_next_all.size(0), -1)
 
+                    # 4) Single forward pass over all sibling next states
                     with torch.no_grad():
-                        q_online = self.q_net(x_next)
-                        a_star = q_online.argmax(dim=1)
-                        q_tgt = self.target_q_net(x_next)
-                        v_j = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1).cpu().numpy()
+                        q_online_all = self.q_net(x_next_all)
+                        a_star_all = q_online_all.argmax(dim=1)
+                        q_tgt_all = self.target_q_net(x_next_all)
+                        v_all = q_tgt_all.gather(
+                            1, a_star_all.unsqueeze(1)
+                        ).squeeze(1).cpu().numpy()
 
-                    targets_j = rewards_j + (1.0 - done_j) * gamma * v_j
-                    target_agg[i] = float(targets_j.mean())
+                    # 5) Per-group averaged targets
+                    target_agg = np.empty((B,), dtype=np.float32)
+                    target_var_list = []
 
-                batch["target_agg"] = target_agg
+                    for i, (start, end) in enumerate(group_slices):
+                        if end == start:
+                            target_agg[i] = 0.0
+                            target_var_list.append(0.0)
+                            continue
+
+                        rewards_j = rewards_all[start:end]
+                        done_j    = done_all[start:end]
+                        v_j       = v_all[start:end]
+
+                        targets_j = rewards_j + (1.0 - done_j) * gamma * v_j
+                        target_agg[i] = float(targets_j.mean())
+                        target_var_list.append(float(np.var(targets_j)))
+
+                    batch["target_agg"] = target_agg
+                    batch["mit_effective_batch_size"] = float(len(all_indices))
+                    if target_var_list:
+                        batch["mit_target_var_mean"] = float(np.mean(target_var_list))
+                        batch["mit_target_var_max"] = float(np.max(target_var_list))
+                    else:
+                        batch["mit_target_var_mean"] = 0.0
+                        batch["mit_target_var_max"] = 0.0
 
             elif method == "model":
                 for bi, (s_raw, a_raw) in enumerate(zip(batch["obs"], batch["actions"])):
@@ -304,11 +432,15 @@ class DQNAgent:
             out["group_sizes"] = torch.as_tensor(
                 group_sizes, dtype=torch.float32, device=self.device
             )
-
         if "target_agg" in batch:
             out["target_agg"] = torch.as_tensor(
                 batch["target_agg"], dtype=torch.float32, device=self.device
             )
+        if "mit_effective_batch_size" in batch:
+            out["mit_effective_batch_size"] = float(batch["mit_effective_batch_size"])
+        if "mit_target_var_mean" in batch:
+            out["mit_target_var_mean"] = float(batch["mit_target_var_mean"])
+            out["mit_target_var_max"] = float(batch["mit_target_var_max"])
 
         return out
 
@@ -446,6 +578,16 @@ class DQNAgent:
 
                             if wandb.run is not None:
                                 metrics["train/td_error_hist"] = wandb.Histogram(td)
+
+                        mit_eff = batch.get("mit_effective_batch_size", None)
+                        if mit_eff is not None:
+                            metrics["mit/effective_batch_size"] = float(mit_eff)
+                            metrics["mit/effective_batch_factor"] = float(mit_eff) / float(self.cfg.agents.replay.batch_size)
+
+                        tv_mean = batch.get("mit_target_var_mean", None)
+                        if tv_mean is not None:
+                            metrics["mit/target_var_mean"] = float(tv_mean)
+                            metrics["mit/target_var_max"] = float(batch.get("mit_target_var_max", 0.0))
 
                         log_metrics(metrics, step=self.global_step)
 

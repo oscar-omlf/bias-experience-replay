@@ -8,21 +8,21 @@ replay:
   eps: 1.0e-6
   alpha: 0.6
   beta: 0.4
-  beta_anneal_steps: 2000 # 35000
+  beta_anneal_steps: 20000 # 35000
 
   sa_mitigation:
     enabled: false
-    method: other   # avg | other | none
-    include_self: true
+    method: none   # avg | other | none
+    include_self: false
     min_group: 1
-    max_group: 8 # 64
+    max_group: 16 # 64
     update_all_siblings: true
 
 # Exploration
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 5000 # 130000
+  decay_steps: 15000 # 130000
 
 # Optimization
 optimizer:

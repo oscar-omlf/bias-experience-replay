@@ -20,7 +20,12 @@ def setup_wandb(cfg, config_dict=None):
     mit_cfg = getattr(cfg.agents.replay, "sa_mitigation", None)
     if mit_cfg is not None and bool(getattr(mit_cfg, "enabled", False)):
         mit_method = str(getattr(mit_cfg, "method"))
-        mit_label = f"mit-{mit_method}"
+        max_group = getattr(mit_cfg, "max_group", None)  # NEW
+
+        if mit_method == "avg" and max_group is not None:
+            mit_label = f"mit-{mit_method}-g{max_group}"
+        else:
+            mit_label = f"mit-{mit_method}"
     else:
         mit_label = "nomit"
 

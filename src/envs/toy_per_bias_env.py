@@ -118,6 +118,7 @@ class ToyPERBiasEnv(gym.Env):
             terminated = True
 
         self.state = ns
+        reward /= self.r_high
         return ns, float(reward), terminated, truncated, {}
 
     def render(self):
