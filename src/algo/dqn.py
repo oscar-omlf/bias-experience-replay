@@ -46,7 +46,8 @@ class DoubleDQN:
                 target = r + (1.0 - dones) * self.gamma * next_q
 
         # loss = F.smooth_l1_loss(q_sa, target)
-        per_sample_loss = F.smooth_l1_loss(q_sa, target, reduction="none")
+        # per_sample_loss = F.smooth_l1_loss(q_sa, target, reduction="none")
+        per_sample_loss = F.mse_loss(q_sa, target, reduction="none")
         loss = (weights * per_sample_loss).mean()
         optimizer.zero_grad()
         loss.backward()
