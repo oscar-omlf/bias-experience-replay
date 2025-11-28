@@ -1,0 +1,8 @@
+id: ConalBandit-v0
+n_arms: 5
+r_bar: 2.0
+sigma_min: 0.1
+sigma_max: 2.0
+means: null  # [3.0, 2.75, 2.5, 2.25, 2.0]
+max_episode_steps: 1
+render_mode: null

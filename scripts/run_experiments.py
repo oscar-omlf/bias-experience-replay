@@ -135,7 +135,7 @@ def run_single_seed(
     # W&B settings for this experiment
     cfg.wandb.project = "PER-Bias-Mitigation"
     cfg.wandb.job_type = "training"
-    cfg.wandb.group = env_key
+    cfg.wandb.group = f"{env_key}-{agent_key}"
 
     summary = run_training(cfg)
 

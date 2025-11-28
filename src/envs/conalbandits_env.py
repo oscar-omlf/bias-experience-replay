@@ -1,4 +1,4 @@
-from typing import Tuple, Callable
+from typing import Tuple, Callable, Sequence, Optional
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -10,7 +10,8 @@ from .frozenlake_env import _obs_adapter_factory
 
 class ConalBanditEnv(gym.Env):
     """
-    Conal multi-armed bandit from 'Uncertainty Prioritized Experience Replay' (https://arxiv.org/abs/2506.09270).
+    Conal / shifted multi-armed bandit from
+    'Uncertainty Prioritized Experience Replay' (https://arxiv.org/abs/2506.09270).
 
     States:
       - Single dummy state s=0. The problem is stateless (k-arm bandit).
@@ -20,11 +21,18 @@ class ConalBanditEnv(gym.Env):
 
     Reward:
       - For chosen arm a:
-          r(a) = r_bar + eta * sigma(a)
-          eta ~ Normal(0, 1)
-          sigma(a) = a/(n_arms-1) * sigma_max + sigma_min
+          r(a) = \mu(a) + \eta * \sigma(a)
+          \eta ~ Normal(0, 1)
+          \sigma(a) = a/(n_arms-1) * sigma_max + sigma_min
 
-      - All arms have the same mean r_bar, increasing noise as a increases.
+      - Conal bandit (all arms same mean):
+          \mu(a) = r_bar  for all a
+
+      - Shifted bandit:
+          \mu(a) comes from a user-provided vector means of length n_arms.
+
+    Exposed attributes:
+      - true_means: np.ndarray of shape [n_arms] with \mu(a) for each arm.
     """
 
     metadata = {"render_modes": ["human", "ansi"]}
@@ -35,6 +43,7 @@ class ConalBanditEnv(gym.Env):
         r_bar: float = 2.0,
         sigma_max: float = 2.0,
         sigma_min: float = 0.1,
+        means: Optional[Sequence[float]] = None,
         render_mode=None,
     ):
         super().__init__()
@@ -44,6 +53,18 @@ class ConalBanditEnv(gym.Env):
         self.sigma_max = float(sigma_max)
         self.sigma_min = float(sigma_min)
         self.render_mode = render_mode
+
+        # True means per arm: conal (all equal) or shifted (user-provided)
+        if means is None:
+            # Conal bandit: all arms have the same mean r_bar
+            self.true_means = np.full(self.n_arms, self.r_bar, dtype=np.float32)
+        else:
+            arr = np.asarray(means, dtype=np.float32)
+            if arr.shape[0] != self.n_arms:
+                raise ValueError(
+                    f"means length {arr.shape[0]} does not match n_arms={self.n_arms}"
+                )
+            self.true_means = arr
 
         # One dummy state
         self.observation_space = spaces.Discrete(1)
@@ -67,17 +88,20 @@ class ConalBanditEnv(gym.Env):
 
     def step(self, action):
         assert self.action_space.contains(action), f"Invalid action {action}"
+        a = int(action)
 
-        sigma_a = self._sigma(int(action))
+        sigma_a = self._sigma(a)
         eta = self.np_random.normal(loc=0.0, scale=1.0)
-        reward = self.r_bar + eta * sigma_a
+
+        # General form: \mu(a) + \eta \sigma(a)
+        reward = float(self.true_means[a] + eta * sigma_a)
 
         # Stateless continuing task: never 'terminated' inside env.
         terminated = False
         truncated = False
         info = {}
 
-        return self.state, float(reward), terminated, truncated, info
+        return self.state, reward, terminated, truncated, info
 
     def render(self):
         if self.render_mode == "ansi":
@@ -93,14 +117,17 @@ class ConalBanditEnv(gym.Env):
 
 def make_conal_bandit(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     """
-    cfg has:
-      - n_arms
-      - r_bar
-      - sigma_max
-      - sigma_min
-      - max_episode_steps
-      - render_mode
+    cfg fields:
+      - n_arms: int
+      - r_bar: float
+      - sigma_max: float
+      - sigma_min: float
+      - means: optional list[float] (for shifted bandits)
+      - max_episode_steps: int
+      - render_mode: str or null
     """
+    means = getattr(cfg, "means", None)
+
     kwargs = dict(
         n_arms=int(getattr(cfg, "n_arms", 5)),
         r_bar=float(getattr(cfg, "r_bar", 2.0)),
@@ -108,6 +135,8 @@ def make_conal_bandit(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
         sigma_min=float(getattr(cfg, "sigma_min", 0.1)),
         render_mode=getattr(cfg, "render_mode", None),
     )
+    if means is not None:
+        kwargs["means"] = list(means)
 
     env = ConalBanditEnv(**kwargs)
     eval_env = ConalBanditEnv(**kwargs)
