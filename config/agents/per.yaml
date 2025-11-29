@@ -8,21 +8,21 @@ replay:
   eps: 1.0e-6
   alpha: 0.6
   beta: 0.4
-  beta_anneal_steps: 20000 # 35000
+  beta_anneal_steps: 200000 # 35000
 
   sa_mitigation:
     enabled: false
     method: none   # avg | other | none
     include_self: false
     min_group: 1
-    max_group: 16 # 64
+    max_group: 2 # 64
     update_all_siblings: true
 
 # Exploration
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 15000 # 130000
+  decay_steps: 50000 # 130000
 
 # Optimization
 optimizer:
@@ -30,7 +30,7 @@ optimizer:
   weight_decay: 0
 
 # DQN / DDQN specifics
-gamma: 1.0 # 0.99
+gamma: 0.0  #  1.0  # 0.99
 handle_time_limit_as_terminal: true
 train_freq: 1              # gradient step each env step
 learning_starts: 100 # 10000
@@ -38,8 +38,8 @@ gradient_steps: 1
 max_grad_norm: 10.0
 
 target_update:
-  interval: 10 # 1
-  tau: 1 # 0.01
+  interval: 100 # 1
+  tau: 1.0 # 0.01
 
 # Network
 model:
@@ -50,5 +50,5 @@ model:
   fc_hidden: 128
 
 # Logging and eVal
-log_interval_steps: 300
-eval_episodes: 50
+log_interval_steps: 1000
+eval_episodes: 20

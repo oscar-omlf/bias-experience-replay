@@ -62,7 +62,11 @@ class DQNAgent:
         print(f"[Init] obs_space={obs_space}, n_actions={self.n_actions}, model={self.model_type}, info={info}")
 
         # Optimizer
-        self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.cfg.agents.optimizer.lr, weight_decay=self.cfg.agents.optimizer.weight_decay)
+        self.optimizer = optim.Adam(
+            self.q_net.parameters(),
+            lr=self.cfg.agents.optimizer.lr,
+            weight_decay=self.cfg.agents.optimizer.weight_decay
+        )
 
         # Algo
         self.algo = DoubleDQN(
@@ -102,7 +106,12 @@ class DQNAgent:
                 )
                 print("[Init] TabularDynamicsModel initialized for model-based PER mitigation.")
 
-    
+        # per-action stats (policy & replay) and bandit detection
+        self.action_counts = np.zeros(self.n_actions, dtype=np.int64)
+        self.sample_counts = np.zeros(self.n_actions, dtype=np.int64)
+        # Bandit-like env exposes true_means at the unwrapped level
+        self._is_bandit_env = hasattr(self.env.unwrapped, "true_means")
+
     def _encode_obs(self, obs):
         x = self.obs_adapter(obs)
         x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
@@ -156,7 +165,7 @@ class DQNAgent:
 
         groups = None
         group_sizes = None
-        
+
         if use_mitigation:
             method = str(mit_cfg.method).lower()
             
@@ -337,6 +346,10 @@ class DQNAgent:
             weights=weights, indices=indices
         )
         
+        act_np = actions.detach().cpu().numpy()
+        for a in act_np:
+            self.sample_counts[int(a)] += 1
+
         # new metrics for the bias mitigation technique
         if groups is not None:
             out["mitigation_groups"] = groups
@@ -354,6 +367,39 @@ class DQNAgent:
             out["mit_target_var_max"] = float(batch["mit_target_var_max"])
 
         return out
+
+    @torch.no_grad()
+    def _compute_bandit_metrics(self) -> Dict[str, float]:
+        """
+        If the env is a conal bandit, compute:
+          - MSE/MAE between Q(a) and true_means(a)
+          - per-arm Q, true_mean, and error
+        """
+        env_base = self.env.unwrapped
+        if not hasattr(env_base, "true_means"):
+            return {}
+
+        true_means = np.asarray(env_base.true_means, dtype=np.float32)
+        # Single bandit state assumed to be 0
+        q = self.q_net(self._encode_obs(0)).detach().cpu().numpy()[0]
+
+        n = min(len(true_means), len(q))
+        true_means = true_means[:n]
+        q = q[:n]
+
+        mse = float(np.mean((q - true_means) ** 2))
+        mae = float(np.mean(np.abs(q - true_means)))
+
+        metrics: Dict[str, float] = {
+            "bandit/mse_q_true": mse,
+            "bandit/mae_q_true": mae,
+        }
+        for i in range(n):
+            metrics[f"bandit/q_arm_{i}"] = float(q[i])
+            metrics[f"bandit/true_mean_arm_{i}"] = float(true_means[i])
+            metrics[f"bandit/err_arm_{i}"] = float(q[i] - true_means[i])
+
+        return metrics
 
     def _maybe_update_target(self):
         if self.global_step > 0 and (self.global_step % self.cfg.agents.target_update.interval == 0):
@@ -407,6 +453,9 @@ class DQNAgent:
         while self.global_step < self.cfg.train.total_steps:
             epsilon = self.eps_sched(self.global_step)
             a = self._select_action(o, epsilon)
+
+            self.action_counts[a] += 1
+
             no, r, terminated, truncated, _ = self.env.step(a)
             d = terminated or truncated
 
@@ -499,6 +548,24 @@ class DQNAgent:
                         if tv_mean is not None:
                             metrics["mit/target_var_mean"] = float(tv_mean)
                             metrics["mit/target_var_max"] = float(batch.get("mit_target_var_max", 0.0))
+
+                        total_actions = self.action_counts.sum()
+                        if total_actions > 0:
+                            for a_idx in range(self.n_actions):
+                                metrics[f"policy/frac_action_{a_idx}"] = (
+                                    float(self.action_counts[a_idx]) / float(total_actions)
+                                )
+
+                        total_samples = self.sample_counts.sum()
+                        if total_samples > 0:
+                            for a_idx in range(self.n_actions):
+                                metrics[f"replay/frac_samples_action_{a_idx}"] = (
+                                    float(self.sample_counts[a_idx]) / float(total_samples)
+                                )
+
+                        if self._is_bandit_env:
+                            bandit_metrics = self._compute_bandit_metrics()
+                            metrics.update(bandit_metrics)
 
                         log_metrics(metrics, step=self.global_step)
 

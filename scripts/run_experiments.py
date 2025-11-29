@@ -24,6 +24,7 @@ AGENT_VARIANTS = {
             "agents=per",
             "agents.replay.sa_mitigation.enabled=false",
             "agents.replay.sa_mitigation.method=none",
+            "agents.replay.sa_mitigation.max_group=null",
         ],
     },
     "per_sib_sample": {
@@ -33,6 +34,7 @@ AGENT_VARIANTS = {
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=other",
             "agents.replay.sa_mitigation.update_all_siblings=false",
+            "agents.replay.sa_mitigation.max_group=0",
         ],
     },
     "per_sib_avg": {
@@ -51,6 +53,7 @@ AGENT_VARIANTS = {
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=model",
             "agents.replay.sa_mitigation.update_all_siblings=false",
+            "agents.replay.sa_mitigation.max_group=null",
         ],
     },
 }

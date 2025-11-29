@@ -14,8 +14,8 @@ wandb:
   job_type: train
 
 train:
-  total_steps: 10000
-  eval_interval_episodes: 25
+  total_steps: 200000
+  eval_interval_episodes: 10
   checkpoint_interval_episodes: 0
   save_dir: outputs/checkpoints
   
