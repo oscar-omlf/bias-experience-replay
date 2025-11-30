@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Dict
-import time
+import random
 import numpy as np
 import torch
 import torch.optim as optim
@@ -165,13 +165,57 @@ class DQNAgent:
 
         groups = None
         group_sizes = None
+        use_next_obs = True
 
         if use_mitigation:
             method = str(mit_cfg.method).lower()
-            
+
             if method in ("avg", "other"):
                 include_self = bool(mit_cfg.include_self)
                 min_group = int(mit_cfg.min_group)
+
+            if method == "other":
+                repl_idx = []
+                for idx in batch["indices"]:
+                    key = self.replay.idx_to_key[idx]
+                    if key is None:
+                        repl_idx.append(None)
+                        continue
+
+                    lst = self.replay.by_sa.get(key, [])
+                    if len(lst) < max(min_group, 1):
+                        repl_idx.append(None)
+                        continue
+
+                    if not include_self and len(lst) <= 1:
+                        repl_idx.append(None)
+                        continue
+
+                    # Sample until we don't pick self if include_self is False
+                    alt = idx
+                    if include_self:
+                        alt = int(random.choice(lst))
+                    else:
+                        alt = idx
+                        while alt == idx:
+                            alt = int(random.choice(lst))
+                    repl_idx.append(alt)
+
+                chosen = [i for i in repl_idx if i is not None]
+                if chosen:
+                    fetched = self.replay.fetch(chosen)
+                    row_of = {int(i): k for k, i in enumerate(fetched["indices"])}
+                    for bi, alt_idx in enumerate(repl_idx):
+                        if alt_idx is None:
+                            continue
+                        k = row_of[int(alt_idx)]
+                        batch["next_obs"][bi] = fetched["next_obs"][k]
+                        batch["rewards"][bi] = fetched["rewards"][k]
+                        batch["terminated"][bi] = fetched["terminated"][k]
+                        batch["truncated"][bi] = fetched["truncated"][k]
+
+            elif method == "avg":
+                use_next_obs = False
                 max_group = int(mit_cfg.max_group)
 
                 groups = self.replay.sibling_groups(
@@ -181,32 +225,6 @@ class DQNAgent:
                     max_group=max_group,
                 )
 
-            if method == "other":
-                # Replace (next_obs, r, term, trunc) transition with another sibling (if exists)
-                repl_idx = []
-                for g, idx in zip(groups, batch["indices"]):
-                    if len(g) == 0:
-                        repl_idx.append(None)
-                    else:
-                        repl_idx.append(int(np.random.choice(g)))
-
-                chosen = [i for i in repl_idx if i is not None]
-                if len(chosen) > 0:
-                    fetched = self.replay.fetch(chosen)
-                    if fetched is None or "indices" not in fetched:
-                        pass
-                    else:
-                        row_of = {int(i): k for k, i in enumerate(fetched["indices"])}
-                        for bi, alt_idx in enumerate(repl_idx):
-                            if alt_idx is None:
-                                continue
-                            k = row_of[int(alt_idx)]
-                            batch["next_obs"][bi] = fetched["next_obs"][k]
-                            batch["rewards"][bi] = fetched["rewards"][k]
-                            batch["terminated"][bi] = fetched["terminated"][k]
-                            batch["truncated"][bi] = fetched["truncated"][k]
-
-            elif method == "avg":
                 B = len(batch["indices"])
                 gamma = float(self.cfg.agents.gamma)
 
@@ -320,10 +338,14 @@ class DQNAgent:
             np.stack([self.obs_adapter(o) for o in batch["obs"]]),
             dtype=torch.float32, device=self.device
         )
-        next_obs = torch.as_tensor(
-            np.stack([self.obs_adapter(o) for o in batch["next_obs"]]),
-            dtype=torch.float32, device=self.device
-        )
+        if use_next_obs:
+            next_obs = torch.as_tensor(
+                np.stack([self.obs_adapter(o) for o in batch["next_obs"]]),
+                dtype=torch.float32, device=self.device
+            )
+        else:
+            next_obs = torch.empty(0, device=self.device)
+
         actions = torch.as_tensor(batch["actions"], dtype=torch.long, device=self.device)
         rewards = torch.as_tensor(batch["rewards"], dtype=torch.float32, device=self.device)
         terminated = torch.as_tensor(batch["terminated"], dtype=torch.float32, device=self.device)
@@ -347,8 +369,8 @@ class DQNAgent:
         )
         
         act_np = actions.detach().cpu().numpy()
-        for a in act_np:
-            self.sample_counts[int(a)] += 1
+        binc = np.bincount(act_np, minlength=self.n_actions)
+        self.sample_counts[:self.n_actions] += binc
 
         # new metrics for the bias mitigation technique
         if groups is not None:

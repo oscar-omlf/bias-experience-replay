@@ -34,7 +34,6 @@ AGENT_VARIANTS = {
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=other",
             "agents.replay.sa_mitigation.update_all_siblings=false",
-            "agents.replay.sa_mitigation.max_group=0",
         ],
     },
     "per_sib_avg": {

@@ -13,9 +13,9 @@ replay:
   sa_mitigation:
     enabled: false
     method: none   # avg | other | none
-    include_self: false
+    include_self: true
     min_group: 1
-    max_group: 2 # 64
+    max_group: 8 # 64
     update_all_siblings: true
 
 # Exploration

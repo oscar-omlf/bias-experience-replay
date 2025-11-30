@@ -19,7 +19,7 @@ def make_env(env_cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
         env, eval_env, obs_adapter = make_miniatar(env_cfg, seed)
     elif env_id == "ToyPERBias-v0":
         env, eval_env, obs_adapter = make_toy_per_bias(env_cfg, seed)
-    elif env_id == "ConalBandit-v0":
+    elif env_id == "ConalBandit-v0" or env_id == "ConalBanditShifted-v0":
         env, eval_env, obs_adapter = make_conal_bandit(env_cfg, seed)
     else:
         raise ValueError(f"Unsupported env id: {env_id}")

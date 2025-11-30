@@ -1,6 +1,7 @@
+import random
 from typing import Dict, Sequence, List
-import numpy as np
 from collections import defaultdict
+import numpy as np
 from .base import ReplayBuffer
 
 class SumTree:
@@ -178,22 +179,57 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         min_group: int,
         max_group: int
     ) -> List[List[int]]:
-        groups = []
+        groups: List[List[int]] = []
+        # Cache
+        key_to_lst = {}
+
+        cap = max_group if max_group and max_group > 0 else None
         for idx in indices:
             key = self.idx_to_key[idx]
             if key is None:
                 groups.append([])
                 continue
-            lst = self.by_sa.get(key, [])
-            if include_self:
-                g = list(lst)
+
+            if key not in key_to_lst:
+                key_to_lst[key] = self.by_sa.get(key, [])
+
+            lst = key_to_lst[key]
+            n = len(lst)
+
+            if n == 0:
+                groups.append([])
+                continue
+
+            # Trying to avoid O(n)
+            if cap is None:
+                # We shouldn't do this... will be very slow
+                if include_self:
+                    g = list(lst)
+                else:
+                    g = [j for j in lst if j != idx]
             else:
-                g = [j for j in lst if j != idx]
-            if max_group and len(g) > max_group:
-                g = np.random.choice(g, size=max_group, replace=False).tolist()
+                want = cap
+                if include_self:
+                    if n <= want:
+                        g = list(lst)
+                    else:
+                        # g = np.random.choice(lst, size=want, replace=False).tolist()
+                        g = random.sample(lst, want)
+                else:
+                    if n <= want + 1:
+                        g = [j for j in lst if j != idx]
+                    else:
+                        g_set = set()
+                        while len(g_set) < want:
+                            cand = lst[np.random.randint(0, n)]
+                            if cand != idx:
+                                g_set.add(int(cand))
+                        g = list(g_set)
+
             if len(g) < min_group:
-                g = []  # caller will fallback to original idx
+                g = []
             groups.append(g)
+
         return groups
 
     def update_priorities(self, indices, priorities):
