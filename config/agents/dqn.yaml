@@ -14,7 +14,7 @@ replay:
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 15000
+  decay_steps: 50000
 
 # Optimization
 optimizer:
@@ -22,7 +22,7 @@ optimizer:
   weight_decay: 0
 
 # DQN / DDQN specifics
-gamma: 1.0
+gamma: 0.0  # 1.0
 handle_time_limit_as_terminal: true
 train_freq: 1              # gradient step each env step
 learning_starts: 100
@@ -42,5 +42,5 @@ model:
   fc_hidden: 128
 
 # Logging and eVal
-log_interval_steps: 300
-eval_episodes: 50
+log_interval_steps: 1000
+eval_episodes: 20

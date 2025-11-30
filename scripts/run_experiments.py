@@ -14,30 +14,35 @@ from src.utils.seed import set_global_seeds
 AGENT_VARIANTS = {
     "dqn": {
         "label": "DQN",
+        "group": "DQN",
         "overrides": [
             "agents=dqn",
         ],
     },
     "per": {
         "label": "PER",
+        "group": "PER_NOMIT",
         "overrides": [
             "agents=per",
             "agents.replay.sa_mitigation.enabled=false",
             "agents.replay.sa_mitigation.method=none",
-            "agents.replay.sa_mitigation.max_group=null",
+            "agents.replay.sa_mitigation.max_group=0",
         ],
     },
     "per_sib_sample": {
         "label": "PER+SiblingSampling",
+        "group": "PER_SAMPLE",
         "overrides": [
             "agents=per",
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=other",
             "agents.replay.sa_mitigation.update_all_siblings=false",
+            "agents.replay.sa_mitigation.max_group=0",
         ],
     },
     "per_sib_avg": {
         "label": "PER+SiblingAveraging",
+        "group": "PER_AVG",   # we’ll append _gX later
         "overrides": [
             "agents=per",
             "agents.replay.sa_mitigation.enabled=true",
@@ -47,12 +52,13 @@ AGENT_VARIANTS = {
     },
     "per_model": {
         "label": "PER+Model",
+        "group": "PER_MODEL",
         "overrides": [
             "agents=per",
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=model",
             "agents.replay.sa_mitigation.update_all_siblings=false",
-            "agents.replay.sa_mitigation.max_group=null",
+            "agents.replay.sa_mitigation.max_group=0",
         ],
     },
 }
@@ -137,7 +143,13 @@ def run_single_seed(
     # W&B settings for this experiment
     cfg.wandb.project = "PER-Bias-Mitigation"
     cfg.wandb.job_type = "training"
-    cfg.wandb.group = f"{env_key}-{agent_key}"
+
+    base_group = variant.get("group", agent_key)
+    if agent_key == "per_sib_avg":
+        max_group = cfg.agents.replay.sa_mitigation.max_group
+        cfg.wandb.group = f"{base_group}_g{max_group}"
+    else:
+        cfg.wandb.group = base_group
 
     summary = run_training(cfg)
 
