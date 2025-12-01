@@ -3,16 +3,16 @@ algo: dqn
 # Replay / sampling
 replay:
   type: per
-  capacity: 5000 # 200000
-  batch_size: 32 # 128
+  capacity: 10000 # 200000
+  batch_size: 64 # 128
   eps: 1.0e-6
   alpha: 0.6
   beta: 0.4
-  beta_anneal_steps: 200000 # 35000
+  beta_anneal_steps: 160000 # 35000
 
   sa_mitigation:
     enabled: false
-    method: none   # avg | other | none
+    method: none   # avg | other | model | none
     include_self: true
     min_group: 1
     max_group: 8 # 64
@@ -22,7 +22,7 @@ replay:
 epsilon:
   start: 1.0
   end: 0.05
-  decay_steps: 50000 # 130000
+  decay_steps: 100000 # 130000
 
 # Optimization
 optimizer:
@@ -30,25 +30,25 @@ optimizer:
   weight_decay: 0
 
 # DQN / DDQN specifics
-gamma: 0.0  #  1.0  # 0.99
+gamma: 0.9  #  1.0  # 0.99
 handle_time_limit_as_terminal: true
 train_freq: 1              # gradient step each env step
-learning_starts: 100 # 10000
+learning_starts: 5000 # 10000
 gradient_steps: 1
 max_grad_norm: 10.0
 
 target_update:
-  interval: 100 # 1
+  interval: 10 # 1
   tau: 1.0 # 0.01
 
 # Network
 model:
   type: mlp
-  hidden_sizes: [32] # [128, 128]
+  hidden_sizes: [64, 64]  # [128, 128]
   activation: relu
   conv_channels: [16, 32]
   fc_hidden: 128
 
 # Logging and eVal
-log_interval_steps: 1000
+log_interval_steps: 2000
 eval_episodes: 20

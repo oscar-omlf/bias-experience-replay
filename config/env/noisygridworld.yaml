@@ -1,0 +1,7 @@
+id: NoisyGridworld-v0
+goal_reward: 10.0
+noise_mean: 0.0
+noise_std: 1.41421356237
+step_penalty: 0.0
+max_episode_steps: 1000
+render_mode: null
