@@ -1,8 +1,13 @@
 name: ber
 channels:
-  - https://repo.anaconda.com/pkgs/main
-  - https://repo.anaconda.com/pkgs/r
+  - conda-forge
+  - pytorch
+  - defaults
 dependencies:
   - python=3.10
+  - pip
+  - pytorch
+  - cpuonly
   - ipykernel
-prefix: /home/ozzy/miniconda3/envs/ber
+  - pip:
+      - -r requirements_cpu.txt
