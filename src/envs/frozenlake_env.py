@@ -37,8 +37,8 @@ def make_frozenlake(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     if getattr(cfg, "render_mode", None):
         kwargs["render_mode"] = cfg.render_mode
 
-    env = gym.make("FrozenLake-v1", **kwargs)
-    eval_env = gym.make("FrozenLake-v1", **kwargs)
+    env = gym.make(cfg.id, max_episode_steps=int(cfg.max_episode_steps), **kwargs)
+    eval_env = gym.make(cfg.id, max_episode_steps=int(cfg.max_episode_steps), **kwargs)
 
     env = RecordEpisodeStatistics(env)
     eval_env = RecordEpisodeStatistics(eval_env)

@@ -5,9 +5,14 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - pip
   - pytorch
   - cpuonly
+  - numpy
+  - gymnasium
+  - hydra-core
+  - omegaconf
+  - wandb
+  - tqdm
+  - matplotlib
+  - pandas
   - ipykernel
-  - pip:
-      - -r requirements_cpu.txt
