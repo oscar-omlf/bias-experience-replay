@@ -42,7 +42,7 @@ AGENT_VARIANTS = {
     },
     "per_sib_avg": {
         "label": "PER+SiblingAveraging",
-        "group": "PER_AVG",   # we’ll append _gX later
+        "group": "PER_AVG",
         "overrides": [
             "agents=per",
             "agents.replay.sa_mitigation.enabled=true",
@@ -141,7 +141,7 @@ def run_single_seed(
         env_key = env_id
 
     # W&B settings for this experiment
-    cfg.wandb.project = "PER-Bias-Mitigation"
+    cfg.wandb.project = "per-bias-final"
     cfg.wandb.job_type = "training"
 
     base_group = variant.get("group", agent_key)
