@@ -40,15 +40,22 @@ def run_training(cfg: DictConfig):
         device=device,
     )
 
-    if hasattr(agent.replay, "set_debug_key"):
-        agent.replay.set_debug_key(obs=6, action=1)
-
     # Train
     agent.train()
 
     final_eval = agent.evaluate(episodes=cfg.agents.eval_episodes)
 
-    q_values = agent.compute_q_values_all_states()
+    q_values = None
+    try:
+        save_q_values = bool(getattr(cfg.train, "save_q_values", True))
+        max_states = int(getattr(cfg.train, "max_q_values_states", 2048))
+        obs_space = getattr(env, "observation_space", None)
+
+        if save_q_values and obs_space is not None and hasattr(obs_space, "n") and int(obs_space.n) <= max_states:
+            q_values = agent.compute_q_values_all_states()
+    except Exception as e:
+        print(f"[train.py] Skipping q_values export due to: {type(e).__name__}: {e}")
+        q_values = None
 
     # Close
     env.close()

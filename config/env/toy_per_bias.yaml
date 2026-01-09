@@ -1,6 +1,0 @@
-id: ToyPERBias-v0
-max_episode_steps: 20
-p_success: 0.02
-r_high: 45
-safe_chain_len: 10
-render_mode: null

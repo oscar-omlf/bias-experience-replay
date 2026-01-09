@@ -35,7 +35,7 @@ AGENT_VARIANTS = {
         "overrides": [
             "agents=per",
             "agents.replay.sa_mitigation.enabled=true",
-            "agents.replay.sa_mitigation.method=other",
+            "agents.replay.sa_mitigation.method=sample",
             "agents.replay.sa_mitigation.update_all_siblings=false",
             "agents.replay.sa_mitigation.max_group=0",
         ],
@@ -141,7 +141,7 @@ def run_single_seed(
         env_key = env_id
 
     # W&B settings for this experiment
-    cfg.wandb.project = "per-bias-final"
+    cfg.wandb.project = "per-bias-test"
     cfg.wandb.job_type = "training"
 
     base_group = variant.get("group", agent_key)
