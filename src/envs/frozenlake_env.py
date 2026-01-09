@@ -32,8 +32,19 @@ def _obs_adapter_factory(n_states: int) -> Callable:
 
 def make_frozenlake(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     kwargs = dict(is_slippery=bool(cfg.is_slippery))
+
+    if getattr(cfg, "success_rate", None) is not None:
+        kwargs["success_rate"] = float(cfg.success_rate)
+
+    if getattr(cfg, "reward_schedule", None) is not None:
+        rs = cfg.reward_schedule
+        # Hydra may provide ListConfig; convert to plain tuple
+        kwargs["reward_schedule"] = (float(rs[0]), float(rs[1]), float(rs[2]))
+
     if getattr(cfg, "map_name", None):
         kwargs["map_name"] = cfg.map_name
+    if getattr(cfg, "desc", None) is not None:
+        kwargs["desc"] = cfg.desc
     if getattr(cfg, "render_mode", None):
         kwargs["render_mode"] = cfg.render_mode
 
@@ -57,5 +68,6 @@ def make_frozenlake(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
 
     print(f"[Env] train obs_space={env.observation_space}, eval obs_space={eval_env.observation_space}")
     print(f"[Env] action_space={env.action_space}")
+    print(f"[Env] success_rate={kwargs.get('success_rate', None)}, reward_schedule={kwargs.get('reward_schedule', None)}")
 
     return env, eval_env, obs_adapter
