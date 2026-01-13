@@ -8,7 +8,7 @@ from gymnasium.utils import seeding
 from .frozenlake_env import _obs_adapter_factory
 
 
-class ToyPERBiasEnv(gym.Env):
+class TwoChains(gym.Env):
     """
     Toy MDP to study PER bias.
 
@@ -138,13 +138,13 @@ class ToyPERBiasEnv(gym.Env):
 
 def make_toy_per_bias(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     safe_chain_len = int(getattr(cfg, "safe_chain_len", 8))
-    env = ToyPERBiasEnv(
+    env = TwoChains(
         p_success=getattr(cfg, "p_success", 0.1),
         r_high=getattr(cfg, "r_high", 5.0),
         safe_chain_len=safe_chain_len,
         render_mode=getattr(cfg, "render_mode", None),
     )
-    eval_env = ToyPERBiasEnv(
+    eval_env = TwoChains(
         p_success=getattr(cfg, "p_success", 0.1),
         r_high=getattr(cfg, "r_high", 5.0),
         safe_chain_len=safe_chain_len,

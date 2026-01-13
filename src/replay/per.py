@@ -89,6 +89,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.by_sa = defaultdict(list)      # key -> list[int indices]
         self.idx_to_key = [None] * self.capacity
 
+        self.idx_to_pos = np.full((self.capacity,), -1, dtype=np.int64)
+
         # Group priority mass: s_g = sum_{i in group} p_i^alpha (leaf values)
         self.group_mass = defaultdict(float)
 
@@ -130,14 +132,29 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         if old_key is not None:
             lst = self.by_sa.get(old_key, None)
             if lst is not None:
-                try:
-                    lst.remove(self.pos)
-                except ValueError:
-                    pass
+                p = int(self.idx_to_pos[self.pos])
+                # O(1) removal if position bookkeeping is consistent
+                if 0 <= p < len(lst) and int(lst[p]) == int(self.pos):
+                    last = int(lst[-1])
+                    lst[p] = last
+                    self.idx_to_pos[last] = p
+                    lst.pop()
+                    self.idx_to_pos[self.pos] = -1
+                else:
+                    # Fallback to linear search if something went wrong
+                    try:
+                        lst.remove(self.pos)
+                    except ValueError:
+                        pass
+                    self.idx_to_pos[self.pos] = -1
+
+                if len(lst) == 0:
+                    self.by_sa.pop(old_key, None)
+
             self.group_mass[old_key] -= old_leaf
             if self.group_mass[old_key] <= 0.0:
-                # keep dict small/clean
                 self.group_mass.pop(old_key, None)
+
 
         # Write transition
         self.obs[self.pos] = obs
@@ -148,7 +165,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.truncated[self.pos] = float(truncated)
 
         key = self._make_key(self.obs[self.pos], int(self.actions[self.pos]))
-        self.by_sa[key].append(self.pos)
+        lst = self.by_sa[key]
+        lst.append(self.pos)
+        self.idx_to_pos[self.pos] = len(lst) - 1
         self.idx_to_key[self.pos] = key
 
         # New leaf priority (stored as p^alpha)
@@ -384,3 +403,38 @@ class PrioritizedReplayBuffer(ReplayBuffer):
                 w /= wmax
 
         return w.astype(np.float32), n_g, s_g.astype(np.float32), float(S), int(n)
+
+    def leaf_value(self, idx: int) -> float:
+        return float(self.tree.tree[self.tree.leaf_idx(int(idx))])
+
+    def within_group_used_ratio(self, sampled_indices, used_indices):
+        sampled = np.asarray(sampled_indices, dtype=np.int64)
+        used = np.asarray(used_indices, dtype=np.int64)
+        B = sampled.shape[0]
+
+        ratio = np.ones((B,), dtype=np.float32)
+        cond_per = np.ones((B,), dtype=np.float32)
+        cond_unif = np.ones((B,), dtype=np.float32)
+
+        for i in range(B):
+            si = int(sampled[i])
+            ui = int(used[i])
+
+            key = self.idx_to_key[si]
+            if key is None:
+                continue
+
+            ng = len(self.by_sa.get(key, []))
+            sg = float(self.group_mass.get(key, 0.0))
+            if ng <= 0 or sg <= 0.0:
+                continue
+
+            qu = self.leaf_value(ui)
+            p_per = float(qu / sg)
+            p_unif = float(1.0 / ng)
+
+            cond_per[i] = p_per
+            cond_unif[i] = p_unif
+            ratio[i] = float((p_per / p_unif) if p_unif > 0 else 1.0)
+
+        return ratio, cond_per, cond_unif
