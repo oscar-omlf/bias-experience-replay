@@ -136,7 +136,7 @@ class TwoChains(gym.Env):
         pass
 
 
-def make_toy_per_bias(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
+def make_twochains(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     safe_chain_len = int(getattr(cfg, "safe_chain_len", 8))
     env = TwoChains(
         p_success=getattr(cfg, "p_success", 0.1),
@@ -167,7 +167,7 @@ def make_toy_per_bias(cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     n_states = int(env.unwrapped.observation_space.n)
     obs_adapter = _obs_adapter_factory(n_states)
 
-    print(f"[Env] ToyPERBias train obs_space={env.observation_space}, eval obs_space={eval_env.observation_space}")
-    print(f"[Env] ToyPERBias action_space={env.action_space}")
+    print(f"[Env] TwoChains train obs_space={env.observation_space}, eval obs_space={eval_env.observation_space}")
+    print(f"[Env] TwoChains action_space={env.action_space}")
 
     return env, eval_env, obs_adapter

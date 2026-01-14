@@ -1,0 +1,9 @@
+id: ShortcutMaze-v3
+size: 10
+goal_reward: 10.0
+step_penalty: 0.0
+risky_success_prob: 0.02
+risky_success_reward: 200.0
+risky_fail_penalty: -10.0
+max_episode_steps: 200
+render_mode: null
