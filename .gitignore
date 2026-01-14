@@ -215,3 +215,5 @@ results/
 
 commit.txt
 *.zip
+
+logs/

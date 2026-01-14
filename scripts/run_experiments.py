@@ -141,7 +141,7 @@ def run_single_seed(
         env_key = env_id
 
     # W&B settings for this experiment
-    cfg.wandb.project = "per-bias-test"
+    cfg.wandb.project = "ber-fixing-fl"
     cfg.wandb.job_type = "training"
 
     base_group = variant.get("group", agent_key)
