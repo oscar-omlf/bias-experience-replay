@@ -126,6 +126,34 @@ class DQNAgent:
         self._last_eval_success: Optional[float] = None
         self._last_eval_return: Optional[float] = None
 
+        # Bandit AUC diagnostics (for conal/bandit envs)
+        self._bandit_auc_mse = 0.0
+        self._bandit_auc_mae = 0.0
+        self._bandit_auc_q_range = 0.0
+        self._bandit_auc_greedy_sigma = 0.0
+
+        self._last_bandit_step: Optional[int] = None
+        self._last_bandit_mse: Optional[float] = None
+        self._last_bandit_mae: Optional[float] = None
+        self._last_bandit_q_range: Optional[float] = None
+        self._last_bandit_greedy_sigma: Optional[float] = None
+
+        # Time-to-threshold (first step where mse <= threshold)
+        self._bandit_tt_mse: Optional[int] = None
+
+        # Portal diagnostics
+        self._eval_auc_portal_taken = 0.0
+        self._last_eval_portal_taken: Optional[float] = None
+
+        # Time-to-threshold for portal adoption (e.g., portal_taken_rate >= 0.95 for K consecutive evals)
+        self._portal_tt_step: Optional[int] = None
+        self._portal_tt_streak: int = 0
+
+        # Stability: number of flips in route choice across eval checkpoints
+        self._portal_flip_count: int = 0
+        self._last_portal_binary: Optional[int] = None
+
+
     # Terminal success helpers
     def _terminal_kind(self, obs) -> Optional[str]:
         """
@@ -506,6 +534,7 @@ class DQNAgent:
 
     # Bandit diagnostics
     @torch.no_grad()
+    @torch.no_grad()
     def _compute_bandit_metrics(self) -> Dict[str, float]:
         env_base = self.env.unwrapped
         if not hasattr(env_base, "true_means"):
@@ -518,17 +547,41 @@ class DQNAgent:
         true_means = true_means[:n]
         q = q[:n]
 
-        mse = float(np.mean((q - true_means) ** 2))
-        mae = float(np.mean(np.abs(q - true_means)))
+        err = q - true_means
+        mse = float(np.mean(err ** 2))
+        mae = float(np.mean(np.abs(err)))
+
+        q_range = float(np.max(q) - np.min(q))
+        q_std = float(np.std(q))
+
+        greedy_arm = int(np.argmax(q))
+        greedy_sigma = None
+
+        # Optional: infer sigma for ConalBanditEnv-like envs
+        if hasattr(env_base, "sigma_max") and hasattr(env_base, "sigma_min") and hasattr(env_base, "n_arms"):
+            n_arms = int(env_base.n_arms)
+            if n_arms > 1:
+                frac = float(greedy_arm) / float(n_arms - 1)
+            else:
+                frac = 0.0
+            greedy_sigma = float(frac * float(env_base.sigma_max) + float(env_base.sigma_min))
+        else:
+            greedy_sigma = float("nan")
 
         metrics: Dict[str, float] = {
             "bandit/mse_q_true": mse,
             "bandit/mae_q_true": mae,
+            "bandit/q_range": q_range,
+            "bandit/q_std": q_std,
+            "bandit/greedy_arm": float(greedy_arm),
+            "bandit/greedy_arm_sigma": float(greedy_sigma),
         }
+
+        # Keep per-arm diagnostics (fine for 5 arms)
         for i in range(n):
             metrics[f"bandit/q_arm_{i}"] = float(q[i])
             metrics[f"bandit/true_mean_arm_{i}"] = float(true_means[i])
-            metrics[f"bandit/err_arm_{i}"] = float(q[i] - true_means[i])
+            metrics[f"bandit/err_arm_{i}"] = float(err[i])
 
         return metrics
 
@@ -549,27 +602,55 @@ class DQNAgent:
         successes: List[int] = []
         lengths: List[int] = []
 
+        # Route diagnostics (PortalBridgeGrid)
+        portal_taken_eps: List[int] = []
+        portal_success_eps: List[int] = []
+        detour_success_eps: List[int] = []
+        fall_eps: List[int] = []
+
         for _ in range(episodes):
             obs, _info = self.eval_env.reset()
             done = False
             ep_ret = 0.0
             ep_len = 0
 
+            ep_took_portal = False
+
             while not done:
                 a = self._select_action(obs, epsilon=0.0)
-                next_obs, r, terminated, truncated, _ = self.eval_env.step(a)
+                next_obs, r, terminated, truncated, info = self.eval_env.step(a)
                 done = terminated or truncated
+
                 ep_ret += float(r)
                 ep_len += 1
+
+                # Track portal usage if env provides it
+                if isinstance(info, dict) and ("took_portal" in info):
+                    ep_took_portal = ep_took_portal or bool(info["took_portal"])
+
                 obs = next_obs
 
             returns.append(ep_ret)
+            lengths.append(ep_len)
+
+            # Standard success: goal vs hole if we can detect, else ep_ret>0 fallback
             kind = self._terminal_kind(obs)
             if kind is None:
-                successes.append(1 if ep_ret > 0 else 0)
+                success = 1 if ep_ret > 0 else 0
+                successes.append(success)
+                # If we cannot detect goal/hole, don't fabricate fall/goal splits
+                fall = 0
+                goal = success
             else:
-                successes.append(1 if kind == "goal" else 0)
-            lengths.append(ep_len)
+                goal = 1 if kind == "goal" else 0
+                fall = 1 if kind == "hole" else 0
+                successes.append(goal)
+
+            # Route metrics
+            portal_taken_eps.append(1 if ep_took_portal else 0)
+            fall_eps.append(int(fall))
+            portal_success_eps.append(1 if (goal == 1 and ep_took_portal) else 0)
+            detour_success_eps.append(1 if (goal == 1 and (not ep_took_portal)) else 0)
 
         ret = np.asarray(returns, dtype=np.float32)
         succ = np.asarray(successes, dtype=np.float32)
@@ -600,21 +681,30 @@ class DQNAgent:
         metrics: Dict[str, float] = {
             "eval/return_mean": return_mean,
             "eval/return_std": return_std,
-            "eval/return_q10": q10,
-            "eval/return_q50": q50,
-            "eval/return_q90": q90,
+            "eval/return_q10": float(q10),
+            "eval/return_q50": float(q50),
+            "eval/return_q90": float(q90),
             "eval/success_rate": success_rate,
             "eval/success_any": float(success_any),
             "eval/episode_length": ep_len_mean,
             "eval/auc_success": float(self._eval_auc_success),
             "eval/auc_return": float(self._eval_auc_return),
         }
+
+        # Route diagnostics (safe even if env doesn't provide took_portal; then it's always False)
+        if portal_taken_eps:
+            metrics["eval/portal_taken_rate"] = float(np.mean(portal_taken_eps))
+            metrics["eval/portal_success_rate"] = float(np.mean(portal_success_eps))
+            metrics["eval/detour_success_rate"] = float(np.mean(detour_success_eps))
+            metrics["eval/fall_rate"] = float(np.mean(fall_eps))
+
         if self.first_eval_goal_step is not None:
             metrics["eval/first_goal_step"] = float(self.first_eval_goal_step)
 
         log_metrics(metrics, step=self.global_step)
         self.eval_logs.append({"step": int(self.global_step), **metrics})
         return metrics
+
 
     # Training
     def train(self):
@@ -789,7 +879,53 @@ class DQNAgent:
 
                         # Bandit diagnostics
                         if self._is_bandit_env:
-                            metrics.update(self._compute_bandit_metrics())
+                            b = self._compute_bandit_metrics()
+                            metrics.update(b)
+
+                            # time-to-threshold
+                            mse = b.get("bandit/mse_q_true", None)
+                            # default threshold; you can make it config-driven if you want
+                            mse_thr = float(getattr(getattr(self.cfg.agents, "logging", None), "bandit_mse_threshold", 1e-3))
+                            if mse is not None and self._bandit_tt_mse is None and mse <= mse_thr:
+                                self._bandit_tt_mse = int(self.global_step)
+                            if self._bandit_tt_mse is not None:
+                                metrics["bandit/tt_mse"] = float(self._bandit_tt_mse)
+                                metrics["bandit/mse_threshold"] = float(mse_thr)
+
+                            # trapezoid AUC over env steps at log points 
+                            cur_step = int(self.global_step)
+                            if self._last_bandit_step is not None:
+                                dt = float(cur_step - self._last_bandit_step)
+                                if dt > 0:
+                                    # MSE AUC
+                                    if self._last_bandit_mse is not None and mse is not None:
+                                        self._bandit_auc_mse += 0.5 * (self._last_bandit_mse + float(mse)) * dt
+                                    # MAE AUC
+                                    mae = b.get("bandit/mae_q_true", None)
+                                    if self._last_bandit_mae is not None and mae is not None:
+                                        self._bandit_auc_mae += 0.5 * (self._last_bandit_mae + float(mae)) * dt
+                                    # Q-range AUC (useful in conal case)
+                                    q_range = b.get("bandit/q_range", None)
+                                    if self._last_bandit_q_range is not None and q_range is not None:
+                                        self._bandit_auc_q_range += 0.5 * (self._last_bandit_q_range + float(q_range)) * dt
+                                    # Greedy sigma AUC (optional “variance attraction” diagnostic)
+                                    gs = b.get("bandit/greedy_arm_sigma", None)
+                                    if self._last_bandit_greedy_sigma is not None and gs is not None and np.isfinite(gs):
+                                        self._bandit_auc_greedy_sigma += 0.5 * (self._last_bandit_greedy_sigma + float(gs)) * dt
+
+                            # Update last values
+                            self._last_bandit_step = cur_step
+                            self._last_bandit_mse = float(mse) if mse is not None else None
+                            self._last_bandit_mae = float(b.get("bandit/mae_q_true", 0.0))
+                            self._last_bandit_q_range = float(b.get("bandit/q_range", 0.0))
+                            gs_now = b.get("bandit/greedy_arm_sigma", float("nan"))
+                            self._last_bandit_greedy_sigma = float(gs_now) if np.isfinite(gs_now) else None
+
+                            # Log AUCs
+                            metrics["bandit/auc_mse_q_true"] = float(self._bandit_auc_mse)
+                            metrics["bandit/auc_mae_q_true"] = float(self._bandit_auc_mae)
+                            metrics["bandit/auc_q_range"] = float(self._bandit_auc_q_range)
+                            metrics["bandit/auc_greedy_arm_sigma"] = float(self._bandit_auc_greedy_sigma)
 
                         log_metrics(metrics, step=self.global_step)
 

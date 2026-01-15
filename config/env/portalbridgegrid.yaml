@@ -1,0 +1,8 @@
+id: PortalBridgeGrid-v0
+nrow: 6
+ncol: 9
+max_episode_steps: 200
+p_fail: 0.005
+step_cost: -0.1
+goal_reward: 20.0
+hole_reward: -100.0

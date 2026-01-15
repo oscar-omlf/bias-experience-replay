@@ -47,13 +47,21 @@ EXTRA="${EXTRA_OVERRIDES[$SLURM_ARRAY_TASK_ID]}"
 # --- Common overrides ---
 # Adjust env id if your Hydra env key differs
 BASE_OVERRIDES=(
-  "env=frozenlake"
-  "env.success_rate=0.99"
-  "env.reward_schedule=[50.0,-100.0,-0.01]"
+  # "env=outlierbandit"
+  # "env.success_rate=0.99"
+  # "env.reward_schedule=[50.0,-100.0,-0.01]"
+  "env=portalbridgegrid"
+  "agents.gamma=0.99"
+  "agents.learning_starts=5000"
+  "agents.replay.batch_size=128"
+  "agents.target_update.interval= 1000"
+  "agents.replay.capacity=50000"
+  "agents.epsilon.decay_steps=500000"
+  "train.total_steps=500000"
 )
 
 # Seeds for final runs
-SEEDS=(0 1 2 3 4)
+SEEDS=(0)
 
 echo "Running agent=${AGENT}"
 echo "Extra override=${EXTRA}"
@@ -62,7 +70,7 @@ echo "Extra override=${EXTRA}"
 CMD=(python -m scripts.run_experiments
   --agent "${AGENT}"
   --seeds "${SEEDS[@]}"
-  --results-root "results/frozenlake/${SLURM_JOB_ID}"
+  --results-root "results/conalbandits/${SLURM_JOB_ID}"
   --override "${BASE_OVERRIDES[@]}"
 )
 

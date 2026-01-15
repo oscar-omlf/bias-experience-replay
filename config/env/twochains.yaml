@@ -1,4 +1,4 @@
-id: TwoChains-v0
+id: TwoChains-v1
 max_episode_steps: 20
 p_success: 0.02
 r_high: 45

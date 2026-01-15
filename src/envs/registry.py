@@ -7,6 +7,8 @@ from .frozenlake_env import make_frozenlake
 from .twochains import make_twochains
 from .conalbandits_env import make_conal_bandit
 from .noisygridworld_env import make_noisy_gridworld
+from .outlierbandit_env import make_outlierbandit
+from .portalbridgegrid_env import make_portalbridgegrid
 
 
 def make_env(env_cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
@@ -18,12 +20,16 @@ def make_env(env_cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
         env, eval_env, obs_adapter = make_frozenlake(env_cfg, seed)
     # elif env_id.startswith("MinAtar/"):
     #     env, eval_env, obs_adapter = make_miniatar(env_cfg, seed)
-    elif env_id == "TwoChains-v0":
+    elif env_id == "TwoChains-v1":
         env, eval_env, obs_adapter = make_twochains(env_cfg, seed)
     elif env_id == "ConalBandit-v0" or env_id == "ConalBanditShifted-v0":
         env, eval_env, obs_adapter = make_conal_bandit(env_cfg, seed)
     elif env_id == "NoisyGridworld-v0":
         env, eval_env, obs_adapter = make_noisy_gridworld(env_cfg, seed)
+    elif env_id == "OutlierBandit-v0":
+        env, eval_env, obs_adapter = make_outlierbandit(env_cfg, seed)
+    elif env_id == "PortalBridgeGrid-v0":
+        env, eval_env, obs_adapter = make_portalbridgegrid(env_cfg, seed)
     else:
         raise ValueError(f"Unsupported env id: {env_id}")
 

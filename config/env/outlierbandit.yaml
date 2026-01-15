@@ -1,0 +1,9 @@
+id: OutlierBandit-v0
+max_episode_steps: 1
+n_actions: 2
+# r = r_high w.p. p_success[a], else r_low
+r_low: 1.0
+r_high: 100.0
+# action0: deterministic-ish baseline mean=1.0 (p=0)
+# action1: rare outlier with much higher mean (p=0.01 -> mean=1.99)
+p_success: [0.0, 0.01]

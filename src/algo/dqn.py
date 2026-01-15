@@ -45,8 +45,8 @@ class DoubleDQN:
                 r = rewards_agg if rewards_agg is not None else rewards
                 target = r + (1.0 - dones) * self.gamma * next_q
 
-        per_sample_loss = F.smooth_l1_loss(q_sa, target, reduction="none")  # Huber
-        # per_sample_loss = F.mse_loss(q_sa, target, reduction="none")  # Weighted MSE
+        # per_sample_loss = F.smooth_l1_loss(q_sa, target, reduction="none")  # Huber
+        per_sample_loss = F.mse_loss(q_sa, target, reduction="none")  # Weighted MSE
         loss = (weights * per_sample_loss).mean()
 
         optimizer.zero_grad()
