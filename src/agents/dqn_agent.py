@@ -602,11 +602,28 @@ class DQNAgent:
         successes: List[int] = []
         lengths: List[int] = []
 
-        # Route diagnostics (PortalBridgeGrid)
+        # Episode-level portal
         portal_taken_eps: List[int] = []
-        portal_success_eps: List[int] = []
-        detour_success_eps: List[int] = []
-        fall_eps: List[int] = []
+
+        # Visit-level portal usage (checks state==portal_from and action==portal_action)
+        portal_visits = 0
+        portal_taken_visits = 0
+
+        # Identify portal env structure (PortalBridgeGrid)
+        base_eval = self.eval_env.unwrapped
+        is_portal_env = (
+            hasattr(base_eval, "portal_from")
+            and hasattr(base_eval, "portal_action")
+            and hasattr(base_eval, "ncol")
+        )
+        if is_portal_env:
+            portal_from_rc = tuple(base_eval.portal_from)
+            portal_action = int(base_eval.portal_action)
+            ncol = int(base_eval.ncol)
+        else:
+            portal_from_rc = None
+            portal_action = None
+            ncol = None
 
         for _ in range(episodes):
             obs, _info = self.eval_env.reset()
@@ -617,43 +634,50 @@ class DQNAgent:
             ep_took_portal = False
 
             while not done:
+                # If portal env, count portal state visits BEFORE choosing action
+                if is_portal_env:
+                    s = int(np.asarray(obs).reshape(()))
+                    r, c = divmod(s, ncol)
+                    at_portal = ((r, c) == portal_from_rc)
+                else:
+                    at_portal = False
+
                 a = self._select_action(obs, epsilon=0.0)
+
+                # Visit-level portal use: (at portal state) AND (take portal action)
+                if at_portal:
+                    portal_visits += 1
+                    if int(a) == portal_action:
+                        portal_taken_visits += 1
+
                 next_obs, r, terminated, truncated, info = self.eval_env.step(a)
                 done = terminated or truncated
 
                 ep_ret += float(r)
                 ep_len += 1
 
-                # Track portal usage if env provides it
+                # Episode-level portal flag from env info (preferred)
                 if isinstance(info, dict) and ("took_portal" in info):
                     ep_took_portal = ep_took_portal or bool(info["took_portal"])
 
                 obs = next_obs
 
+            # Episode end
             returns.append(ep_ret)
             lengths.append(ep_len)
 
-            # Standard success: goal vs hole if we can detect, else ep_ret>0 fallback
+            # Standard success: goal vs hole if detectable, else ep_ret>0 fallback
             kind = self._terminal_kind(obs)
             if kind is None:
-                success = 1 if ep_ret > 0 else 0
-                successes.append(success)
-                # If we cannot detect goal/hole, don't fabricate fall/goal splits
-                fall = 0
-                goal = success
+                successes.append(1 if ep_ret > 0 else 0)
             else:
-                goal = 1 if kind == "goal" else 0
-                fall = 1 if kind == "hole" else 0
-                successes.append(goal)
+                successes.append(1 if kind == "goal" else 0)
 
-            # Route metrics
             portal_taken_eps.append(1 if ep_took_portal else 0)
-            fall_eps.append(int(fall))
-            portal_success_eps.append(1 if (goal == 1 and ep_took_portal) else 0)
-            detour_success_eps.append(1 if (goal == 1 and (not ep_took_portal)) else 0)
 
         ret = np.asarray(returns, dtype=np.float32)
         succ = np.asarray(successes, dtype=np.float32)
+        pt = np.asarray(portal_taken_eps, dtype=np.float32) if portal_taken_eps else None
 
         success_rate = float(np.mean(succ)) if succ.size > 0 else 0.0
         return_mean = float(np.mean(ret)) if ret.size > 0 else 0.0
@@ -667,16 +691,57 @@ class DQNAgent:
         if self.first_eval_goal_step is None and success_any > 0.0:
             self.first_eval_goal_step = int(self.global_step)
 
-        # AUC over env steps (trapezoid rule between eval points)
+        # --- AUC updates (trapezoid rule in env steps) ---
         if self._last_eval_step is not None and self._last_eval_success is not None and self._last_eval_return is not None:
             dt = float(self.global_step - self._last_eval_step)
             if dt > 0:
                 self._eval_auc_success += 0.5 * (self._last_eval_success + success_rate) * dt
                 self._eval_auc_return += 0.5 * (self._last_eval_return + return_mean) * dt
 
+                # Portal-taken AUC (episode-level rate, in [0,1])
+                if pt is not None:
+                    portal_taken_rate = float(np.mean(pt)) if pt.size > 0 else 0.0
+                    if self._last_eval_portal_taken is not None:
+                        self._eval_auc_portal_taken += 0.5 * (self._last_eval_portal_taken + portal_taken_rate) * dt
+
+        # Update last eval point fields
         self._last_eval_step = int(self.global_step)
         self._last_eval_success = float(success_rate)
         self._last_eval_return = float(return_mean)
+
+        # Portal taken rate (episode-level)
+        portal_taken_rate = float(np.mean(pt)) if pt is not None and pt.size > 0 else 0.0
+        self._last_eval_portal_taken = float(portal_taken_rate)
+
+        # Portal use rate (visit-level)
+        portal_use_rate = float(portal_taken_visits) / float(portal_visits + 1e-12) if is_portal_env else float("nan")
+
+        # --- Portal TT + flips ---
+        # Configure threshold and consecutive requirement (optional config knobs)
+        log_cfg = getattr(self.cfg.agents, "logging", None)
+        thr = float(getattr(log_cfg, "portal_tt_threshold", 0.95)) if log_cfg is not None else 0.95
+        K = int(getattr(log_cfg, "portal_tt_consecutive", 2)) if log_cfg is not None else 2
+
+        # Binary route decision at checkpoint (use portal_taken_rate, usually near 0 or 1 for greedy eval)
+        portal_binary = 1 if portal_taken_rate >= 0.5 else 0
+        if self._last_portal_binary is not None and portal_binary != self._last_portal_binary:
+            self._portal_flip_count += 1
+        self._last_portal_binary = portal_binary
+
+        # streak toward TT
+        if portal_taken_rate >= thr:
+            self._portal_tt_streak += 1
+        else:
+            self._portal_tt_streak = 0
+
+        if self._portal_tt_step is None and self._portal_tt_streak >= K:
+            self._portal_tt_step = int(self.global_step)
+
+        # Interpret AUC as integral over steps; dividing by steps gives mean-over-training.
+        denom = float(max(1, self.global_step))
+        auc_success_avg = float(self._eval_auc_success / denom)
+        auc_return_avg = float(self._eval_auc_return / denom)
+        portal_auc_taken_avg = float(self._eval_auc_portal_taken / denom) if is_portal_env else float("nan")
 
         metrics: Dict[str, float] = {
             "eval/return_mean": return_mean,
@@ -689,14 +754,26 @@ class DQNAgent:
             "eval/episode_length": ep_len_mean,
             "eval/auc_success": float(self._eval_auc_success),
             "eval/auc_return": float(self._eval_auc_return),
+
+            # Key “table-friendly” scalars:
+            "eval/auc_success_avg": auc_success_avg,   # in [0,1]
+            "eval/auc_return_avg": auc_return_avg,     # average return over training
         }
 
-        # Route diagnostics (safe even if env doesn't provide took_portal; then it's always False)
-        if portal_taken_eps:
-            metrics["eval/portal_taken_rate"] = float(np.mean(portal_taken_eps))
-            metrics["eval/portal_success_rate"] = float(np.mean(portal_success_eps))
-            metrics["eval/detour_success_rate"] = float(np.mean(detour_success_eps))
-            metrics["eval/fall_rate"] = float(np.mean(fall_eps))
+        if is_portal_env:
+            metrics.update({
+                "eval/portal_taken_rate": float(portal_taken_rate),   # episode-level
+                "eval/portal_use_rate": float(portal_use_rate),       # visit-level
+                "eval/portal_auc_taken": float(self._eval_auc_portal_taken),
+                "eval/portal_auc_taken_avg": float(portal_auc_taken_avg),  # in [0,1]
+
+                # Time-to-threshold + stability
+                "eval/portal_flip_count": float(self._portal_flip_count),
+                "eval/portal_tt_threshold": float(thr),
+                "eval/portal_tt_consecutive": float(K),
+            })
+            if self._portal_tt_step is not None:
+                metrics["eval/portal_tt_step"] = float(self._portal_tt_step)
 
         if self.first_eval_goal_step is not None:
             metrics["eval/first_goal_step"] = float(self.first_eval_goal_step)
@@ -704,7 +781,6 @@ class DQNAgent:
         log_metrics(metrics, step=self.global_step)
         self.eval_logs.append({"step": int(self.global_step), **metrics})
         return metrics
-
 
     # Training
     def train(self):
