@@ -803,6 +803,11 @@ class DQNAgent:
             o = no
             self.global_step += 1
 
+            if self.global_step == self.cfg.agents.learning_starts:
+                dbg = getattr(self.replay, "debug_print_groups", None)
+                if dbg is not None:
+                    dbg(top_k=10, max_elems=5)
+
             # Learn
             if (len(self.replay) >= self.cfg.agents.learning_starts) and (self.global_step % self.cfg.agents.train_freq == 0):
                 for _ in range(self.cfg.agents.gradient_steps):

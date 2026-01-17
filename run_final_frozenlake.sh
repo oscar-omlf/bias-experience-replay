@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=28G
-#SBATCH --time=8:00:00
+#SBATCH --time=16:00:00
 #SBATCH --array=0-2%3
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
@@ -29,16 +29,16 @@ AGENTS=(
   "dqn"
   "per"
   "per_sib_sample"
-  # "per_model"
-  # "per_sib_avg"
+  "per_model"
+  "per_sib_avg"
 )
 
 EXTRA_OVERRIDES=(
   ""
   ""
   ""
-  # ""
-  # "agents.replay.sa_mitigation.max_group=4"
+  ""
+  "agents.replay.sa_mitigation.max_group=4"
 )
 
 AGENT="${AGENTS[$SLURM_ARRAY_TASK_ID]}"
@@ -61,7 +61,7 @@ BASE_OVERRIDES=(
 )
 
 # Seeds for final runs
-SEEDS=(0)
+SEEDS=(0 1 2 3 4 5)
 
 echo "Running agent=${AGENT}"
 echo "Extra override=${EXTRA}"

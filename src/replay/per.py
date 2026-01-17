@@ -56,6 +56,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         beta: float = 0.4,
         beta_anneal_steps: int = 0,
         device: str = "cpu",
+        grouping: Optional[dict] = None,
     ):
         self.capacity = int(capacity)
         self.alpha = float(alpha)
@@ -76,8 +77,10 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         if isinstance(obs_shape, int):
             self.obs = np.zeros((self.capacity,), dtype=np.int64)
+            self._obs_dim = 1
         else:
             self.obs = np.zeros((self.capacity,) + tuple(obs_shape), dtype=np.float32)
+            self._obs_dim = int(np.prod(obs_shape))
 
         self.next_obs = np.zeros_like(self.obs)
         self.actions = np.zeros((self.capacity,), dtype=np.int64)
@@ -88,7 +91,6 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Sibling tracking
         self.by_sa = defaultdict(list)      # key -> list[int indices]
         self.idx_to_key = [None] * self.capacity
-
         self.idx_to_pos = np.full((self.capacity,), -1, dtype=np.int64)
 
         # Group priority mass: s_g = sum_{i in group} p_i^alpha (leaf values)
@@ -97,14 +99,63 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Debug
         self.debug_key = None
 
+        # SimHash
+        grouping = grouping or {}
+        self.group_mode = str(grouping.get("mode", "exact_sa")).lower()
+        if self.group_mode not in ("exact_sa", "simhash"):
+            raise ValueError(f"Unknown grouping.mode={self.group_mode}")
+
+        self.hash_bits = int(grouping.get("hash_bits", 32))
+        if not (1 <= self.hash_bits <= 64):
+            raise ValueError("grouping.hash_bits must be in [1,64] for uint64 codes.")
+
+        self.hash_subsample = int(grouping.get("hash_subsample", 0))
+        self.hash_seed = int(grouping.get("hash_seed", 0))
+
+        self._hash_idx = None
+        self._hash_A = None
+        if self.group_mode == "simhash":
+            rng = np.random.RandomState(self.hash_seed)
+
+            if self.hash_subsample and self.hash_subsample > 0 and self._obs_dim > self.hash_subsample:
+                self._hash_idx = rng.choice(self._obs_dim, size=self.hash_subsample, replace=False).astype(np.int64)
+                d = int(self.hash_subsample)
+            else:
+                self._hash_idx = None
+                d = int(self._obs_dim)
+
+            # Random Gaussian projection matrix for SimHash
+            self._hash_A = rng.normal(loc=0.0, scale=1.0, size=(self.hash_bits, d)).astype(np.float32)
+
     def _make_key(self, obs, action: int):
-        if self.obs.ndim == 1:
-            s_key = int(obs)
-        else:
-            # Ensure consistent dtype/shape with storage
-            arr = np.asarray(obs, dtype=self.obs.dtype)
-            s_key = arr.tobytes()
-        return (s_key, int(action))
+        a = int(action)
+
+        if self.group_mode == "exact_sa":
+            if self.obs.ndim == 1:
+                s_key = int(obs)
+            else:
+                # Ensure consistent dtype/shape with storage
+                arr = np.asarray(obs, dtype=self.obs.dtype)
+                s_key = arr.tobytes()
+            return (s_key, int(action))
+
+        elif self.group_mode == "simhash":
+            x = np.asarray(obs, dtype=np.float32).reshape(-1)
+            if self._hash_idx is not None:
+                x = x[self._hash_idx]
+
+            # projections: shape [hash_bits]
+            proj = self._hash_A @ x
+            bits = (proj > 0.0).astype(np.uint8)
+
+            # pack into uint64
+            code = np.uint64(0)
+            # bit 0 is LSB; consistent across runs
+            for k in range(self.hash_bits):
+                if bits[k]:
+                    code |= (np.uint64(1) << np.uint64(k))
+
+            return (int(code), a)
 
     def set_debug_key(self, obs, action):
         self.debug_key = self._make_key(obs, int(action))
@@ -123,6 +174,29 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             "debug_priorities": prios,
             "debug_group_mass": float(self.group_mass.get(self.debug_key, 0.0)),
         }
+
+    def debug_print_groups(self, top_k: int = 10, max_elems: int = 8):
+        """
+        Print the largest groups under current grouping.
+        For exact_sa, shows exact (state, action) or bytes key.
+        For simhash, shows (bucket_id, action).
+        """
+        items = [(key, lst) for key, lst in self.by_sa.items() if len(lst) > 0]
+        items.sort(key=lambda kv: len(kv[1]), reverse=True)
+        items = items[:top_k]
+
+        print(f"[ReplayDebug] group_mode={getattr(self, 'group_mode', 'unknown')} top_k={top_k}")
+        for key, lst in items:
+            print(f"  key={key} size={len(lst)} mass={float(self.group_mass.get(key, 0.0)):.4f}")
+            ex = lst[:max_elems]
+            # Show representative (obs,action,next_obs,r,done) for first few
+            for idx in ex:
+                o = self.obs[int(idx)]
+                a = int(self.actions[int(idx)])
+                no = self.next_obs[int(idx)]
+                r = float(self.rewards[int(idx)])
+                d = float(self.terminated[int(idx)]) if self.terminated is not None else 0.0
+                print(f"    idx={int(idx)} a={a} r={r:.3f} done={d:.0f} o={o} no={no}")
 
     def add(self, obs, action, reward, next_obs, terminated, truncated):
         # If overwriting, remove old membership + subtract old leaf mass

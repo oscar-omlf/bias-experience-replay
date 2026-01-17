@@ -213,8 +213,8 @@ wandb/
 outputs/
 results/
 old_results/
+logs/
 
 commit.txt
 *.zip
-
-logs/
+*.sh
