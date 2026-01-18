@@ -295,10 +295,12 @@ def main(cfg: DictConfig):
 
     collect_steps = int(cfg.train.collect_steps)
     compute_sa = bool(cfg.diagnostics.compute_sa_stats)
+    print(compute_sa)
 
-    obs_list = []
+    obs_list: List[np.ndarray] = []
     trans = {"obs": [], "act": [], "rew": [], "done": [], "next_obs": []}
 
+    # Collect data (global step = t)
     for t in range(collect_steps):
         a = env.action_space.sample()
         next_obs, r, terminated, truncated, _info = env.step(a)
@@ -321,8 +323,8 @@ def main(cfg: DictConfig):
             obs, _ = env.reset()
 
         # lightweight logging during collection
-        if (t > 0) and (t % 50000 == 0):
-            log_metrics({"vqvae/collect_step": float(t)}, step=t)
+        if (t > 0) and (t % 50_000 == 0):
+            log_metrics({"vqvae/collect_step": float(t)}, step=int(t))
 
     env.close()
     eval_env.close()
@@ -331,13 +333,14 @@ def main(cfg: DictConfig):
     if obs_arr.ndim != 4:
         raise ValueError(f"Expected collected obs shape (N,C,H,W); got {obs_arr.shape}")
 
-    # Model config
+    # -------------------------
+    # Build model
+    # -------------------------
     codebook_size = int(cfg.vqvae.codebook_size)
     embed_dim = int(cfg.vqvae.embed_dim)
     hidden_channels = int(cfg.vqvae.hidden_channels)
     beta = float(cfg.vqvae.beta)
 
-    # Derived shapes
     obs_shape = tuple(obs_arr.shape[1:])  # (C,H,W)
     in_channels = int(obs_arr.shape[1])
 
@@ -358,6 +361,10 @@ def main(cfg: DictConfig):
     train_steps = int(cfg.train.train_steps)
     log_every = int(cfg.train.log_interval_steps)
     recon_loss = str(cfg.train.recon_loss).lower()
+
+    # For consistent W&B x-axis
+    global_step_start = collect_steps
+    global_step_end = collect_steps + train_steps
 
     for step in range(train_steps):
         idx = np.random.randint(0, n, size=bs)
@@ -384,16 +391,24 @@ def main(cfg: DictConfig):
         opt.step()
 
         if (step % log_every) == 0:
+            gstep = global_step_start + step
             metrics = {
                 "vqvae/train_loss": float(loss.item()),
                 "vqvae/recon_loss": float(recon.item()),
                 "vqvae/vq_loss": float(vq_loss.item()),
-                "vqvae/step": float(step),
+                "vqvae/train_step": float(step),
             }
-            log_metrics(metrics, step=step)
-            print(f"[vqvae] step={step} loss={metrics['vqvae/train_loss']:.6f} recon={metrics['vqvae/recon_loss']:.6f} vq={metrics['vqvae/vq_loss']:.6f}")
+            log_metrics(metrics, step=int(gstep))
+            print(
+                f"[vqvae] step={step} gstep={gstep} "
+                f"loss={metrics['vqvae/train_loss']:.6f} "
+                f"recon={metrics['vqvae/recon_loss']:.6f} "
+                f"vq={metrics['vqvae/vq_loss']:.6f}"
+            )
 
+    # -------------------------
     # Save checkpoint
+    # -------------------------
     save_path = str(cfg.outputs.save_path)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     ckpt = {
@@ -408,11 +423,12 @@ def main(cfg: DictConfig):
             "beta": beta,
         },
         "env_cfg": OmegaConf.to_container(cfg.env, resolve=True),
+        "global_step_end": int(global_step_end),
     }
     torch.save(ckpt, save_path)
     print(f"[vqvae] saved -> {save_path}")
 
-    # Diagnostics (log + print)
+    # Diagnostics (log at the FINAL global step)
     model.eval()
 
     eval_sample_size = int(cfg.diagnostics.eval_sample_size)
@@ -423,7 +439,7 @@ def main(cfg: DictConfig):
         codebook_size=codebook_size,
         eval_sample_size=eval_sample_size,
     )
-    log_metrics(code_metrics, step=train_steps)
+    log_metrics(code_metrics, step=int(global_step_end))
 
     if compute_sa:
         transitions = {
@@ -441,7 +457,7 @@ def main(cfg: DictConfig):
             sa_eval_sample_size=int(cfg.diagnostics.sa_eval_sample_size),
             min_count_for_sa=int(cfg.diagnostics.min_count_for_sa),
         )
-        log_metrics(sa_metrics, step=train_steps)
+        log_metrics(sa_metrics, step=int(global_step_end))
 
     dump_path = str(cfg.outputs.dump_examples_path) if cfg.outputs.dump_examples_path is not None else ""
     if dump_path:
