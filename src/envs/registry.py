@@ -2,7 +2,7 @@ import gymnasium as gym
 from typing import Tuple, Callable, Dict
 
 from .frozenlake_env import make_frozenlake
-from .minatar_emv import make_minatar
+from .minatar_env import make_minatar
 from .twochains import make_twochains
 from .conalbandits_env import make_conal_bandit
 from .noisygridworld_env import make_noisy_gridworld
