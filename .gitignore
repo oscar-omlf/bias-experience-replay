@@ -213,6 +213,7 @@ wandb/
 outputs/
 results/
 old_results/
+artifacts/
 
 commit.txt
 *.zip
