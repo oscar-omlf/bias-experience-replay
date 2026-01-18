@@ -1,0 +1,16 @@
+env_id: "MinAtar/Breakout-v0"
+seed: 0
+collect_steps: 200000
+
+codebook_size: 512
+embed_dim: 32
+hidden_channels: 64
+beta: 0.25
+
+batch_size: 256
+train_steps: 50000
+lr: 3e-4
+recon_loss: "bce"
+
+save_path: "artifacts/vqvae_minatar_breakout.pt"
+device: "auto"

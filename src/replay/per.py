@@ -56,6 +56,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         beta: float = 0.4,
         beta_anneal_steps: int = 0,
         device: str = "cpu",
+        keyer=None,  # NEW
     ):
         self.capacity = int(capacity)
         self.alpha = float(alpha)
@@ -88,20 +89,55 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Sibling tracking
         self.by_sa = defaultdict(list)      # key -> list[int indices]
         self.idx_to_key = [None] * self.capacity
-
         self.idx_to_pos = np.full((self.capacity,), -1, dtype=np.int64)
 
         # Group priority mass: s_g = sum_{i in group} p_i^alpha (leaf values)
         self.group_mass = defaultdict(float)
 
+        # group keyer (e.g., VQ-VAE)
+        self.keyer = keyer
+
         # Debug
         self.debug_key = None
 
+    def rebuild_groups(self):
+        """
+        Recompute by_sa, idx_to_key, idx_to_pos, and group_mass from scratch.
+
+        WARNING: This changes group assignments for existing transitions if self.keyer changed.
+        Prefer freezing the keyer for theory-faithful runs.
+        """
+        self.by_sa.clear()
+        self.group_mass.clear()
+        self.idx_to_key = [None] * self.capacity
+        self.idx_to_pos[:] = -1
+
+        n = self._valid_n()
+        for idx in range(n):
+            key = self._make_key(self.obs[idx], int(self.actions[idx]))
+            self.idx_to_key[idx] = key
+            lst = self.by_sa[key]
+            lst.append(idx)
+            self.idx_to_pos[idx] = len(lst) - 1
+            leaf = float(self.tree.tree[self.tree.leaf_idx(idx)])
+            self.group_mass[key] += leaf
+
     def _make_key(self, obs, action: int):
+        """
+        Key for sibling grouping.
+
+        If self.keyer is provided, use group_id = keyer(obs).
+        Otherwise:
+        - if scalar-discrete buffer: group_id = int(obs)
+        - else: group_id = obs.tobytes() (exact-match only)
+        """
+        if self.keyer is not None:
+            gid = int(self.keyer(obs))
+            return (gid, int(action))
+
         if self.obs.ndim == 1:
             s_key = int(obs)
         else:
-            # Ensure consistent dtype/shape with storage
             arr = np.asarray(obs, dtype=self.obs.dtype)
             s_key = arr.tobytes()
         return (s_key, int(action))
@@ -154,7 +190,6 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             self.group_mass[old_key] -= old_leaf
             if self.group_mass[old_key] <= 0.0:
                 self.group_mass.pop(old_key, None)
-
 
         # Write transition
         self.obs[self.pos] = obs

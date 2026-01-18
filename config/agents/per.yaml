@@ -18,6 +18,13 @@ replay:
     max_group: 0
     update_all_siblings: false
 
+  grouping:
+    enabled: false
+    type: vqvae
+    ckpt_path: "artifacts/vqvae_minatar_breakout.pt"
+    device: "cpu"
+    cache_size: 200000
+
 # Exploration
 epsilon:
   start: 1.0
