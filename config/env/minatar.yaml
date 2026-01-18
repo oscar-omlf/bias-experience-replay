@@ -1,0 +1,4 @@
+id: "MinAtar/Breakout-v0"   # "MinAtar/Seaquest-v0" | "Breakout-v0" | ...
+max_episode_steps: 2000
+sticky_zeta: 0.05
+render_mode: null

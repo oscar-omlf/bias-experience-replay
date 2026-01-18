@@ -1,16 +1,39 @@
-env_id: "MinAtar/Breakout-v0"
-seed: 0
-collect_steps: 200000
+defaults:
+  - env: minatar
+  - agents: dqn
+  - _self_
 
-codebook_size: 512
-embed_dim: 32
-hidden_channels: 64
-beta: 0.25
+seed: 1
+device: auto
 
-batch_size: 256
-train_steps: 50000
-lr: 3e-4
-recon_loss: "bce"
+wandb:
+  project: bias-experience-replay
+  entity: bias-experience-replay
+  mode: online
+  group: vqvae_minatar_breakout
+  job_type: train_vqvae
 
-save_path: "artifacts/vqvae_minatar_breakout.pt"
-device: "auto"
+train:
+  collect_steps: 300000
+  train_steps: 60000
+  log_interval_steps: 500
+  batch_size: 256
+  lr: 3.0e-4
+  recon_loss: bce
+
+vqvae:
+  codebook_size: 512
+  embed_dim: 32
+  hidden_channels: 64
+  beta: 0.25
+
+diagnostics:
+  eval_sample_size: 50000
+  compute_sa_stats: true
+  sa_eval_sample_size: 100000
+  topk_print: 10
+  min_count_for_sa: 50
+
+outputs:
+  save_path: artifacts/vqvae_minatar_breakout_z0.10.pt
+  dump_examples_path: artifacts/vqvae_group_examples_breakout_z0.10.txt

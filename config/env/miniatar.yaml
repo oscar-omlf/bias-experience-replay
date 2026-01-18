@@ -1,5 +1,0 @@
-id: "MinAtar/SpaceInvaders-v1"   # "MinAtar/Seaquest-v1" | "Breakout-v1" | ...
-game: "space_invaders"
-sticky_zeta: 0.25
-max_episode_steps: 10000
-render_mode: null

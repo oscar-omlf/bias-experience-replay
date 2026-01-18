@@ -2,7 +2,7 @@ import gymnasium as gym
 from typing import Tuple, Callable, Dict
 
 from .frozenlake_env import make_frozenlake
-# from .miniatar_env import make_miniatar
+from .minatar_emv import make_minatar
 from .twochains import make_twochains
 from .conalbandits_env import make_conal_bandit
 from .noisygridworld_env import make_noisy_gridworld
@@ -26,8 +26,8 @@ def make_env(env_cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:
     """
     env_id = env_cfg.id
 
-    # if env_id.startswith("MinAtar/"):
-    #     return make_miniatar(env_cfg, seed)
+    if env_id.startswith("MinAtar/"):
+        return make_minatar(env_cfg, seed)
 
     base_id = env_id.split("-", 1)[0]
     maker = _ENV_MAKERS.get(base_id)

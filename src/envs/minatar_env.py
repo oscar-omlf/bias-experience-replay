@@ -1,10 +1,8 @@
-from __future__ import annotations
 import numpy as np
 import gymnasium as gym
 from gymnasium.wrappers import TimeLimit, RecordEpisodeStatistics
 
 from minatar import gym as minatar_gym
-# import minatar
 
 minatar_gym.register_envs()
 
@@ -26,18 +24,18 @@ class StickyAction(gym.Wrapper):
         self._last_a = action
         return obs, rew, terminated, truncated, info
 
-def _obs_adapter_miniatar():
+def _obs_adapter_minatar():
     def adapt(obs):
         arr = np.asarray(obs)
         # Expected from MinAtar Gymnasium: (H, W, C) with bool/0-1
         if arr.ndim != 3:
-            raise ValueError(f"MiniAtar obs must be 3D HWC; got shape {arr.shape}")
+            raise ValueError(f"MinAtar obs must be 3D HWC; got shape {arr.shape}")
         # HWC -> CHW
         arr = np.transpose(arr, (2, 0, 1)).astype(np.float32)
         return arr  # CHW
     return adapt
 
-def make_miniatar(cfg, seed: int):
+def make_minatar(cfg, seed: int):
     env = gym.make(cfg.id, render_mode=cfg.render_mode)
     eval_env = gym.make(cfg.id, render_mode=cfg.render_mode)
 
@@ -57,8 +55,8 @@ def make_miniatar(cfg, seed: int):
     env.action_space.seed(seed)
     eval_env.action_space.seed(seed + 123)
 
-    obs_adapter = _obs_adapter_miniatar()
+    obs_adapter = _obs_adapter_minatar()
 
-    print(f"[Env] MiniAtar: train obs_space={env.observation_space}, eval obs_space={eval_env.observation_space}")
-    print(f"[Env] MiniAtar: action_space={env.action_space}")
+    print(f"[Env] MinAtar: train obs_space={env.observation_space}, eval obs_space={eval_env.observation_space}")
+    print(f"[Env] MinAtar: action_space={env.action_space}")
     return env, eval_env, obs_adapter
