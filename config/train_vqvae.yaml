@@ -20,6 +20,7 @@ train:
   batch_size: 256
   lr: 3.0e-4
   recon_loss: mse
+  eval_only: false
 
 vqvae:
   codebook_size: 512
@@ -33,7 +34,10 @@ diagnostics:
   sa_eval_sample_size: 100000
   topk_print: 10
   min_count_for_sa: 50
+  examples_per_code: 4
+  bucket_thresholds: [5, 10, 50, 100]
 
 outputs:
   save_path: artifacts/vqvae_minatar_breakout_z0.10.pt
   dump_examples_path: artifacts/vqvae_group_examples_breakout_z0.10.txt
+  load_path: null

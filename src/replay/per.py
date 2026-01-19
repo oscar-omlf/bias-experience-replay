@@ -56,7 +56,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         beta: float = 0.4,
         beta_anneal_steps: int = 0,
         device: str = "cpu",
-        keyer=None,  # NEW
+        keyer=None,
     ):
         self.capacity = int(capacity)
         self.alpha = float(alpha)
@@ -141,6 +141,74 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             arr = np.asarray(obs, dtype=self.obs.dtype)
             s_key = arr.tobytes()
         return (s_key, int(action))
+
+    def grouping_stats(self, n_actions: Optional[int] = None, thresholds: Tuple[int, ...] = (2, 5, 10, 50, 100)) -> Dict[str, float]:
+        """
+        Cheap summary of latent (group,action) buckets.
+
+        Returns metrics that help you verify:
+        - code usage (how many groups are active)
+        - bucket size distribution
+        - fraction of transitions that live in buckets with >=k members
+        - coverage of (code,action) pairs (if K and n_actions known)
+        """
+        out: Dict[str, float] = {}
+
+        # Only meaningful when we actually have grouping keys
+        if self._valid_n() <= 0:
+            return out
+
+        bucket_sizes = np.fromiter((len(v) for v in self.by_sa.values()), dtype=np.int64)
+        n_buckets = int(bucket_sizes.size)
+        out["grouping/ca_pairs_observed"] = float(n_buckets)
+
+        # bucket size distribution
+        if n_buckets > 0:
+            out["grouping/ca_bucket_count_mean"] = float(bucket_sizes.mean())
+            out["grouping/ca_bucket_count_min"] = float(bucket_sizes.min())
+            out["grouping/ca_bucket_count_max"] = float(bucket_sizes.max())
+            out["grouping/ca_bucket_count_p10"] = float(np.quantile(bucket_sizes, 0.10))
+            out["grouping/ca_bucket_count_p50"] = float(np.quantile(bucket_sizes, 0.50))
+            out["grouping/ca_bucket_count_p90"] = float(np.quantile(bucket_sizes, 0.90))
+
+            # fraction of transitions in "usable" buckets (size >= k)
+            total_trans = float(self._valid_n())
+            for k in thresholds:
+                frac = float(bucket_sizes[bucket_sizes >= int(k)].sum()) / (total_trans + 1e-12)
+                out[f"grouping/trans_frac_in_ca_bucket_ge_{int(k)}"] = float(frac)
+
+        # group-id usage (only if key first component is int-like)
+        gids = []
+        for key in self.by_sa.keys():
+            # key is (gid, action) OR (bytes, action) if no keyer
+            gid = key[0]
+            if isinstance(gid, (int, np.integer)):
+                gids.append(int(gid))
+
+        if gids:
+            gid_used = len(set(gids))
+            out["grouping/gid_used"] = float(gid_used)
+
+            # If VQVAEKeyer, we can compute usage frac
+            K = getattr(self.keyer, "codebook_size", None)
+            if K is not None and int(K) > 0:
+                out["grouping/gid_usage_frac"] = float(gid_used) / float(int(K))
+                out["grouping/codebook_size"] = float(int(K))
+
+                if n_actions is not None:
+                    possible = int(K) * int(n_actions)
+                    out["grouping/ca_pairs_possible_in_sample"] = float(possible)
+                    out["grouping/ca_pairs_coverage_frac"] = float(n_buckets) / float(possible + 1e-12)
+
+        # group mass stats (priority mass per (group,action))
+        if self.group_mass:
+            masses = np.asarray(list(self.group_mass.values()), dtype=np.float64)
+            out["grouping/ca_mass_mean"] = float(masses.mean())
+            out["grouping/ca_mass_p90"] = float(np.quantile(masses, 0.90))
+            out["grouping/ca_mass_max"] = float(masses.max())
+
+        return out
+
 
     def set_debug_key(self, obs, action):
         self.debug_key = self._make_key(obs, int(action))

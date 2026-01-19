@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+import time
 
 import numpy as np
 import torch
@@ -77,7 +78,9 @@ class VQVAEKeyer(GroupKeyer):
     """
     Uses a pretrained VQ-VAE encoder to map obs -> code index in {0..K-1}.
 
-    Designed for small image-like inputs (e.g., MinAtar 10x10xC, your custom grids, etc).
+    Robust to obs shaped:
+      - HWC (gym default for MinAtar)
+      - CHW (if you ever store adapted obs)
     """
 
     def __init__(
@@ -87,18 +90,28 @@ class VQVAEKeyer(GroupKeyer):
         cache_size: int = 200_000,
     ):
         self.device = str(device)
+        if self.device == "auto":
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
         self.cache_size = int(cache_size)
         self._cache: Dict[bytes, int] = {}
 
+        # Stats
+        self.calls = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.encode_time_ms = 0.0  # cumulative
+
         ckpt = torch.load(ckpt_path, map_location=self.device)
         cfg = ckpt["vqvae_cfg"]
-        obs_shape = tuple(ckpt["obs_shape"])
-        in_channels = int(cfg["in_channels"])
+        self.obs_shape = tuple(ckpt["obs_shape"])  # (C,H,W)
+        self.in_channels = int(cfg["in_channels"])
+        self.codebook_size = int(cfg["codebook_size"])
 
         self.model = VQVAE(
-            in_channels=in_channels,
-            obs_shape=obs_shape,
-            codebook_size=int(cfg["codebook_size"]),
+            in_channels=self.in_channels,
+            obs_shape=self.obs_shape,
+            codebook_size=self.codebook_size,
             embed_dim=int(cfg["embed_dim"]),
             hidden_channels=int(cfg["hidden_channels"]),
             beta=float(cfg["beta"]),
@@ -106,39 +119,60 @@ class VQVAEKeyer(GroupKeyer):
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval()
 
-    def _obs_to_tensor(self, obs: Any) -> torch.Tensor:
-        x = np.asarray(obs)
-        # Expect HWC (most gym envs), convert -> BCHW
-        if x.ndim == 3:
-            x = x.astype(np.float32)
-            x = np.transpose(x, (2, 0, 1))  # CHW
-            t = torch.from_numpy(x).unsqueeze(0)  # BCHW
-            return t.to(self.device)
-        # Vector-like: (D,)
-        if x.ndim == 1:
-            t = torch.from_numpy(x.astype(np.float32)).unsqueeze(0)  # (1, D)
-            return t.to(self.device)
-        # Scalar
-        if x.ndim == 0:
-            t = torch.tensor([float(x.reshape(()))], dtype=torch.float32, device=self.device).unsqueeze(0)
-            return t
-        raise ValueError(f"VQVAEKeyer got unsupported obs shape {x.shape}")
+    def _obs_to_bchw(self, obs: Any) -> torch.Tensor:
+        x = np.asarray(obs, dtype=np.float32)
+
+        # Expect 3D image
+        if x.ndim != 3:
+            raise ValueError(f"VQVAEKeyer expects 3D obs; got {x.shape}")
+
+        # Detect CHW vs HWC by channel count
+        # - If first dim equals in_channels -> assume CHW
+        # - Else assume HWC
+        if int(x.shape[0]) == int(self.in_channels):
+            chw = x
+        else:
+            # HWC -> CHW
+            chw = np.transpose(x, (2, 0, 1))
+
+        t = torch.from_numpy(chw).unsqueeze(0)  # (1,C,H,W)
+        return t.to(self.device)
+
+    def stats(self) -> Dict[str, float]:
+        calls = max(1, int(self.calls))
+        hit_rate = float(self.cache_hits) / float(calls)
+        avg_ms = float(self.encode_time_ms) / float(max(1, int(self.cache_misses)))
+        return {
+            "vqvae_codebook_size": float(self.codebook_size),
+            "cache_size": float(len(self._cache)),
+            "cache_hits": float(self.cache_hits),
+            "cache_misses": float(self.cache_misses),
+            "cache_hit_rate": float(hit_rate),
+            "encode_ms_per_miss": float(avg_ms),
+        }
 
     def __call__(self, obs: Any) -> int:
+        self.calls += 1
+
         arr = np.asarray(obs)
         key = arr.tobytes()
-        if key in self._cache:
-            return int(self._cache[key])
 
+        cached = self._cache.get(key, None)
+        if cached is not None:
+            self.cache_hits += 1
+            return int(cached)
+
+        self.cache_misses += 1
+        t0 = time.time()
         with torch.no_grad():
-            x = self._obs_to_tensor(obs)
-            idx = self.model.encode_indices(x)  # (B,)
+            x = self._obs_to_bchw(obs)
+            idx = self.model.encode_indices(x)  # (1,)
             code = int(idx.item())
+        self.encode_time_ms += 1000.0 * (time.time() - t0)
 
-        # cache with bounded size
         if self.cache_size > 0:
             if len(self._cache) >= self.cache_size:
-                # cheap eviction: clear entirely (LRU is possible, but this is robust/simple)
                 self._cache.clear()
             self._cache[key] = code
+
         return code

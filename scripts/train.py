@@ -3,6 +3,7 @@ from dataclasses import asdict
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
+import torch
 
 from src.utils.seed import set_global_seeds
 from src.utils.wandb_utils import setup_wandb
@@ -25,6 +26,11 @@ def run_training(cfg: DictConfig):
     # Seeding
     set_global_seeds(cfg.seed)
 
+    if str(device).startswith("cuda"):
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     # W&B
     run = setup_wandb(cfg, config_dict=OmegaConf.to_container(cfg, resolve=True))
 
@@ -42,7 +48,6 @@ def run_training(cfg: DictConfig):
 
     # Train
     agent.train()
-
     final_eval = agent.evaluate(episodes=cfg.agents.eval_episodes)
 
     q_values = None

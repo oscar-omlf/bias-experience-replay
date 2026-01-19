@@ -154,12 +154,18 @@ def _compute_sa_stats(
     codebook_size: int,
     sa_eval_sample_size: int,
     min_count_for_sa: int,
+    bucket_thresholds: List[int],
 ) -> Dict[str, float]:
     """
-    Computes (code,action)-level diagnostics:
-      - reward std within (c,a)
-      - done rate within (c,a)
-      - entropy of next_code within (c,a)
+    Computes (code,action)-level diagnostics for latent grouping quality.
+
+    Returns metrics including:
+      - counts distribution over observed (code,action) buckets
+      - fraction of transitions that fall into buckets with count >= threshold
+      - reward std within (code,action)
+      - done rate within (code,action)
+      - entropy of next_code within (code,action)
+
     Assumes obs and next_obs are (N,C,H,W).
     """
     obs = np.asarray(transitions["obs"], dtype=np.float32)
@@ -187,7 +193,7 @@ def _compute_sa_stats(
 
     K = int(codebook_size)
 
-    from collections import defaultdict
+    # Aggregate per (c,a)
     counts = defaultdict(int)
     rew_sum = defaultdict(float)
     rew_sumsq = defaultdict(float)
@@ -202,6 +208,31 @@ def _compute_sa_stats(
         done_sum[key] += float(di)
         next_counts[key][int(c2i)] += 1
 
+    # Bucket size distribution over *all observed* (c,a)
+    bucket_sizes = np.asarray(list(counts.values()), dtype=np.int64)
+    if bucket_sizes.size == 0:
+        bucket_sizes = np.asarray([0], dtype=np.int64)
+
+    def _q(arr, qs):
+        arr = np.asarray(arr, dtype=np.float32)
+        return [float(x) for x in np.quantile(arr, qs)] if arr.size > 0 else [0.0 for _ in qs]
+
+    bs_p10, bs_p50, bs_p90 = _q(bucket_sizes, [0.10, 0.50, 0.90])
+    bs_min = float(np.min(bucket_sizes))
+    bs_max = float(np.max(bucket_sizes))
+    bs_mean = float(np.mean(bucket_sizes))
+
+    # Fraction of transitions that are in “usable” buckets (based on bucket count)
+    # NOTE: this is based on sampled m transitions; good enough for diagnostics.
+    # We compute bucket size for each sampled transition’s (c,a) key, using the global counts dict.
+    per_transition_bucket_size = np.asarray([counts[(int(ci), int(ai))] for ci, ai in zip(c, act_s)], dtype=np.int64)
+
+    frac_ge = {}
+    for thr in bucket_thresholds:
+        thr_i = int(thr)
+        frac_ge[thr_i] = float(np.mean(per_transition_bucket_size >= thr_i))
+
+    # Summarize per (c,a) keys with enough support (>= min_count_for_sa)
     ent_list = []
     rstd_list = []
     done_list = []
@@ -218,24 +249,101 @@ def _compute_sa_stats(
         rstd_list.append(rstd)
         done_list.append(dr)
 
-    return {
+    # Quantiles for the “counted” buckets (>= min_count_for_sa)
+    ent_arr = np.asarray(ent_list, dtype=np.float32)
+    rstd_arr = np.asarray(rstd_list, dtype=np.float32)
+    done_arr = np.asarray(done_list, dtype=np.float32)
+
+    ent_mean = float(np.mean(ent_arr)) if ent_arr.size > 0 else 0.0
+    ent_p90 = float(np.quantile(ent_arr, 0.90)) if ent_arr.size >= 5 else ent_mean
+    ent_max = float(np.max(ent_arr)) if ent_arr.size > 0 else 0.0
+
+    rstd_mean = float(np.mean(rstd_arr)) if rstd_arr.size > 0 else 0.0
+    rstd_p90 = float(np.quantile(rstd_arr, 0.90)) if rstd_arr.size >= 5 else rstd_mean
+    rstd_max = float(np.max(rstd_arr)) if rstd_arr.size > 0 else 0.0
+
+    done_mean = float(np.mean(done_arr)) if done_arr.size > 0 else 0.0
+    done_p90 = float(np.quantile(done_arr, 0.90)) if done_arr.size >= 5 else done_mean
+    done_max = float(np.max(done_arr)) if done_arr.size > 0 else 0.0
+
+    out: Dict[str, float] = {
+        # Existing-style summaries (support-filtered)
         "grouping/sa_pairs_counted": float(len(ent_list)),
-        "grouping/sa_next_code_entropy_mean": float(np.mean(ent_list)) if ent_list else 0.0,
-        "grouping/sa_reward_std_mean": float(np.mean(rstd_list)) if rstd_list else 0.0,
-        "grouping/sa_done_rate_mean": float(np.mean(done_list)) if done_list else 0.0,
+        "grouping/sa_next_code_entropy_mean": ent_mean,
+        "grouping/sa_next_code_entropy_p90": ent_p90,
+        "grouping/sa_next_code_entropy_max": ent_max,
+        "grouping/sa_reward_std_mean": rstd_mean,
+        "grouping/sa_reward_std_p90": rstd_p90,
+        "grouping/sa_reward_std_max": rstd_max,
+        "grouping/sa_done_rate_mean": done_mean,
+        "grouping/sa_done_rate_p90": done_p90,
+        "grouping/sa_done_rate_max": done_max,
+
+        # NEW: bucket size distribution over all observed (c,a)
+        "grouping/ca_bucket_count_mean": bs_mean,
+        "grouping/ca_bucket_count_p10": bs_p10,
+        "grouping/ca_bucket_count_p50": bs_p50,
+        "grouping/ca_bucket_count_p90": bs_p90,
+        "grouping/ca_bucket_count_min": bs_min,
+        "grouping/ca_bucket_count_max": bs_max,
     }
 
+    # NEW: transition fraction in buckets above thresholds
+    for thr_i, v in frac_ge.items():
+        out[f"grouping/trans_frac_in_ca_bucket_ge_{thr_i}"] = float(v)
 
-def _dump_top_codes(model: VQVAE, obs_arr: np.ndarray, device: str, codebook_size: int, eval_sample_size: int, topk_print: int, path: str):
+    # Also report how much of (c,a) space is “covered”
+    # Max possible pairs is K * A, but A we infer from sampled actions:
+    A_obs = int(np.max(act_s) + 1) if act_s.size > 0 else 0
+    out["grouping/ca_pairs_observed"] = float(len(counts))
+    out["grouping/ca_pairs_possible_in_sample"] = float(K * A_obs) if A_obs > 0 else 0.0
+    out["grouping/ca_pairs_coverage_frac"] = float(len(counts) / float(K * A_obs)) if A_obs > 0 else 0.0
+
+    return out
+
+
+def _dump_top_codes(
+    model: VQVAE,
+    obs_arr: np.ndarray,
+    device: str,
+    codebook_size: int,
+    eval_sample_size: int,
+    topk_print: int,
+    examples_per_code: int,
+    path: str,
+):
     """
     Dumps human-readable examples for top-k codes:
       - count
       - ASCII mean map
+      - a few individual example frames
+
     Assumes obs_arr is (N,C,H,W).
     """
     xall = np.asarray(obs_arr, dtype=np.float32)
     if xall.ndim != 4:
         raise ValueError(f"Expected obs_arr shape (N,C,H,W); got {xall.shape}")
+
+    def _ascii_single_frame(obs_chw: np.ndarray) -> str:
+        x = np.asarray(obs_chw, dtype=np.float32)
+        if x.ndim != 3:
+            return "<bad frame>"
+        # (C,H,W) -> occupancy (H,W)
+        occ = x.sum(axis=0)
+        mx = float(np.max(occ)) if occ.size > 0 else 1.0
+        if mx <= 0:
+            mx = 1.0
+        y = occ / mx
+        chars = " .:-=+*#%@"
+        H, W = y.shape
+        out_lines = []
+        for r in range(H):
+            line = ""
+            for c in range(W):
+                idx = int(np.clip(round(y[r, c] * (len(chars) - 1)), 0, len(chars) - 1))
+                line += chars[idx]
+            out_lines.append(line)
+        return "\n".join(out_lines)
 
     n = xall.shape[0]
     m = min(int(eval_sample_size), n)
@@ -253,21 +361,43 @@ def _dump_top_codes(model: VQVAE, obs_arr: np.ndarray, device: str, codebook_siz
 
     lines = []
     lines.append(f"Top-{topk} codes (out of K={K}) from sample m={m}\n")
+
     for k in top_codes:
         ck = int(counts[k])
         lines.append(f"=== code={k} count={ck} ===")
         if ck <= 0:
             lines.append("<empty>\n")
             continue
+
         mask = (codes == k)
         xb = sample[mask]  # (ck,C,H,W)
+
+        # Mean map
+        lines.append("[mean map]")
         lines.append(_ascii_mean_map(xb))
+        lines.append("")
+
+        # Example frames
+        ex = min(int(examples_per_code), xb.shape[0])
+        if ex > 0:
+            pick = np.random.choice(xb.shape[0], size=ex, replace=False)
+            for i, pi in enumerate(pick):
+                lines.append(f"[example {i+1}/{ex}]")
+                lines.append(_ascii_single_frame(xb[int(pi)]))
+                lines.append("")
         lines.append("")
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write("\n".join(lines))
     print(f"[vqvae] wrote grouping examples -> {path}")
+
+
+def _load_vqvae_ckpt(load_path: str, device: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    ckpt = torch.load(load_path, map_location=device)
+    if "state_dict" not in ckpt or "vqvae_cfg" not in ckpt:
+        raise ValueError(f"Checkpoint at {load_path} missing state_dict/vqvae_cfg keys.")
+    return ckpt, ckpt["vqvae_cfg"]
 
 
 @hydra.main(config_path="../config", config_name="train_vqvae", version_base=None)
@@ -344,92 +474,122 @@ def main(cfg: DictConfig):
     obs_shape = tuple(obs_arr.shape[1:])  # (C,H,W)
     in_channels = int(obs_arr.shape[1])
 
-    model = VQVAE(
-        in_channels=in_channels,
-        obs_shape=obs_shape,
-        codebook_size=codebook_size,
-        embed_dim=embed_dim,
-        hidden_channels=hidden_channels,
-        beta=beta,
-    ).to(device)
+    # added eval only mode
+    eval_only = bool(getattr(cfg.train, "eval_only", False))
+    load_path = getattr(cfg.outputs, "load_path", None)
+    if eval_only:
+        if load_path is None or str(load_path) == "" or str(load_path).lower() == "none":
+            raise ValueError("train.eval_only=true requires outputs.load_path to point to a saved vqvae checkpoint.")
 
-    opt = optim.Adam(model.parameters(), lr=float(cfg.train.lr))
+        ckpt, vcfg = _load_vqvae_ckpt(str(load_path), device=device)
 
-    # Training params
-    n = obs_arr.shape[0]
-    bs = int(cfg.train.batch_size)
-    train_steps = int(cfg.train.train_steps)
-    log_every = int(cfg.train.log_interval_steps)
-    recon_loss = str(cfg.train.recon_loss).lower()
+        # Use checkpoint architecture (safer than cfg if you changed K/dims)
+        model = VQVAE(
+            in_channels=int(vcfg["in_channels"]),
+            obs_shape=tuple(vcfg["obs_shape"]),
+            codebook_size=int(vcfg["codebook_size"]),
+            embed_dim=int(vcfg["embed_dim"]),
+            hidden_channels=int(vcfg["hidden_channels"]),
+            beta=float(vcfg["beta"]),
+        ).to(device)
+        model.load_state_dict(ckpt["state_dict"])
+        model.eval()
 
-    # For consistent W&B x-axis
-    global_step_start = collect_steps
-    global_step_end = collect_steps + train_steps
+        # Use ckpt values for diagnostics so everything is consistent
+        codebook_size = int(vcfg["codebook_size"])
 
-    for step in range(train_steps):
-        idx = np.random.randint(0, n, size=bs)
-        batch = obs_arr[idx]  # (B,C,H,W)
-        x = _to_tensor_batch(batch, device=device)
+        # Skip training
+        train_steps = 0
+        print(f"[vqvae] eval-only: loaded {load_path} (K={codebook_size})")
 
-        out = model(x)
-        x_hat = out["x_hat"]
-        vq_loss = out["vq_loss"]
+    else:
+        # Train normally (your existing logic)
+        model = VQVAE(
+            in_channels=in_channels,
+            obs_shape=obs_shape,
+            codebook_size=codebook_size,
+            embed_dim=embed_dim,
+            hidden_channels=hidden_channels,
+            beta=beta,
+        ).to(device)
 
-        if recon_loss == "bce":
-            x_in = x.clamp(0.0, 1.0)
-            xh = torch.sigmoid(x_hat)
-            recon = torch.mean(F.binary_cross_entropy(xh, x_in, reduction="none"))
-        elif recon_loss == "mse":
-            recon = torch.mean((x_hat - x) ** 2)
-        else:
-            raise ValueError(f"Unknown recon_loss={recon_loss}")
+        opt = optim.Adam(model.parameters(), lr=float(cfg.train.lr))
 
-        loss = recon + vq_loss
+        n = obs_arr.shape[0]
+        bs = int(cfg.train.batch_size)
+        train_steps = int(cfg.train.train_steps)
+        log_every = int(cfg.train.log_interval_steps)
+        recon_loss = str(cfg.train.recon_loss).lower()
 
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+        for step in range(train_steps):
+            idx = np.random.randint(0, n, size=bs)
+            batch = obs_arr[idx]
+            x = _to_tensor_batch(batch, device=device)
 
-        if (step % log_every) == 0:
-            gstep = global_step_start + step
-            metrics = {
-                "vqvae/train_loss": float(loss.item()),
-                "vqvae/recon_loss": float(recon.item()),
-                "vqvae/vq_loss": float(vq_loss.item()),
-                "vqvae/train_step": float(step),
-            }
-            log_metrics(metrics, step=int(gstep))
-            print(
-                f"[vqvae] step={step} gstep={gstep} "
-                f"loss={metrics['vqvae/train_loss']:.6f} "
-                f"recon={metrics['vqvae/recon_loss']:.6f} "
-                f"vq={metrics['vqvae/vq_loss']:.6f}"
-            )
+            out = model(x)
+            x_hat = out["x_hat"]
+            vq_loss = out["vq_loss"]
+
+            if recon_loss == "bce":
+                x_in = x.clamp(0.0, 1.0)
+                xh = torch.sigmoid(x_hat)
+                recon = torch.mean(F.binary_cross_entropy(xh, x_in, reduction="none"))
+            elif recon_loss == "mse":
+                recon = torch.mean((x_hat - x) ** 2)
+            else:
+                raise ValueError(f"Unknown recon_loss={recon_loss}")
+
+            loss = recon + vq_loss
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            
+            if (step % log_every) == 0:
+                gstep = global_step_start + step
+                metrics = {
+                    "vqvae/train_loss": float(loss.item()),
+                    "vqvae/recon_loss": float(recon.item()),
+                    "vqvae/vq_loss": float(vq_loss.item()),
+                    "vqvae/train_step": float(step),
+                }
+                log_metrics(metrics, step=int(gstep))
+                print(
+                    f"[vqvae] step={step} gstep={gstep} "
+                    f"loss={metrics['vqvae/train_loss']:.6f} "
+                    f"recon={metrics['vqvae/recon_loss']:.6f} "
+                    f"vq={metrics['vqvae/vq_loss']:.6f}"
+                )
 
     # -------------------------
     # Save checkpoint
     # -------------------------
-    save_path = str(cfg.outputs.save_path)
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    ckpt = {
-        "state_dict": model.state_dict(),
-        "obs_shape": obs_shape,
-        "vqvae_cfg": {
-            "in_channels": in_channels,
+    if not eval_only:
+        save_path = str(cfg.outputs.save_path)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        ckpt = {
+            "state_dict": model.state_dict(),
             "obs_shape": obs_shape,
-            "codebook_size": codebook_size,
-            "embed_dim": embed_dim,
-            "hidden_channels": hidden_channels,
-            "beta": beta,
-        },
-        "env_cfg": OmegaConf.to_container(cfg.env, resolve=True),
-        "global_step_end": int(global_step_end),
-    }
-    torch.save(ckpt, save_path)
-    print(f"[vqvae] saved -> {save_path}")
+            "vqvae_cfg": {
+                "in_channels": in_channels,
+                "obs_shape": obs_shape,
+                "codebook_size": codebook_size,
+                "embed_dim": embed_dim,
+                "hidden_channels": hidden_channels,
+                "beta": beta,
+            },
+            "env_cfg": OmegaConf.to_container(cfg.env, resolve=True),
+            "global_step_end": int(global_step_end),
+        }
+        torch.save(ckpt, save_path)
+        print(f"[vqvae] saved -> {save_path}")
 
-    # Diagnostics (log at the FINAL global step)
+    # -------------------------
+    # Diagnostics (log + print)
+    # -------------------------
     model.eval()
+
+    global_step_end = int(collect_steps + train_steps)
 
     eval_sample_size = int(cfg.diagnostics.eval_sample_size)
     code_metrics = _compute_code_metrics(
@@ -439,7 +599,7 @@ def main(cfg: DictConfig):
         codebook_size=codebook_size,
         eval_sample_size=eval_sample_size,
     )
-    log_metrics(code_metrics, step=int(global_step_end))
+    log_metrics(code_metrics, step=global_step_end)
 
     if compute_sa:
         transitions = {
@@ -449,6 +609,9 @@ def main(cfg: DictConfig):
             "done": np.asarray(trans["done"], dtype=np.float32),
             "next_obs": np.asarray(trans["next_obs"], dtype=np.float32),
         }
+
+        # NEW: thresholds for “bucket usability”
+        bucket_thresholds = list(OmegaConf.select(cfg, "diagnostics.bucket_thresholds", default=[5, 10, 50, 100]))
         sa_metrics = _compute_sa_stats(
             model=model,
             transitions=transitions,
@@ -456,11 +619,13 @@ def main(cfg: DictConfig):
             codebook_size=codebook_size,
             sa_eval_sample_size=int(cfg.diagnostics.sa_eval_sample_size),
             min_count_for_sa=int(cfg.diagnostics.min_count_for_sa),
+            bucket_thresholds=[int(x) for x in bucket_thresholds],
         )
-        log_metrics(sa_metrics, step=int(global_step_end))
+        log_metrics(sa_metrics, step=global_step_end)
 
     dump_path = str(cfg.outputs.dump_examples_path) if cfg.outputs.dump_examples_path is not None else ""
     if dump_path:
+        examples_per_code = int(OmegaConf.select(cfg, "diagnostics.examples_per_code", default=4))
         _dump_top_codes(
             model=model,
             obs_arr=obs_arr,
@@ -468,8 +633,10 @@ def main(cfg: DictConfig):
             codebook_size=codebook_size,
             eval_sample_size=eval_sample_size,
             topk_print=int(cfg.diagnostics.topk_print),
+            examples_per_code=examples_per_code,
             path=dump_path,
         )
+
 
     if run is not None:
         run.finish()

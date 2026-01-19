@@ -234,32 +234,101 @@ class DQNAgent:
                 truncated=truncated,
             )
 
+    def _grouping_metrics(self) -> Dict[str, float]:
+        """
+        Logs whether latent grouping is active and whether buckets are usable.
+        """
+        out: Dict[str, float] = {}
+
+        if not self.is_per:
+            return out
+
+        # Is grouping enabled?
+        grouping = getattr(self.cfg.agents.replay, "grouping", None)
+        enabled = bool(getattr(grouping, "enabled", False)) if grouping is not None else False
+        out["grouping/enabled"] = float(enabled)
+
+        # If PER replay exposes stats
+        if hasattr(self.replay, "grouping_stats"):
+            try:
+                out.update(self.replay.grouping_stats(n_actions=self.n_actions))
+            except Exception as e:
+                out["grouping/stats_error"] = 1.0
+                out["grouping/stats_error_type"] = float(1.0)  # keep numeric; error text goes to stdout
+                print(f"[grouping] failed to compute grouping_stats: {type(e).__name__}: {e}")
+
+        # Keyer stats (cache hit rate, etc.)
+        keyer = getattr(self.replay, "keyer", None)
+        if keyer is not None and hasattr(keyer, "stats"):
+            ks = keyer.stats()
+            for k, v in ks.items():
+                out[f"grouping/keyer_{k}"] = float(v)
+
+        return out
+
     def _sample_batch(self) -> Dict[str, Any]:
         batch = self.replay.sample(self.cfg.agents.replay.batch_size)
+
+        obs_space = self.env.observation_space  # <-- IMPORTANT: define once for all branches
 
         mit_cfg = self.mit_cfg
         use_mitigation = (self.is_per and mit_cfg is not None and bool(mit_cfg.enabled))
         method = str(getattr(mit_cfg, "method", "none")).lower() if use_mitigation else "none"
 
-        # Track which indices are actually used to generate (r, s', done)
         used_indices = np.array(batch["indices"], copy=True) if batch.get("indices", None) is not None else None
 
         use_next_obs = True
         groups_used: Optional[List[List[int]]] = None
         group_sizes_used = None
 
-        # Mitigation diagnostics
         mit_sample_replace_frac = None
         mit_sample_self_frac = None
         mit_sample_group_size_mean = None
         mit_avg_valid_group_frac = None
 
+        # ---------- helper: robust + fast batch conversion ----------
+        def _adapt_obs_batch_np(obs_batch_np: Any) -> np.ndarray:
+            """
+            Returns float32 numpy batch in the format the network expects:
+            - Discrete envs: uses obs_adapter (keeps legacy behavior perfectly)
+            - Image envs with fixed HWC: vectorized HWC->CHW
+            - Fallback: obs_adapter per item
+            """
+            x = np.asarray(obs_batch_np)
+
+            # Discrete scalar observations (FrozenLake, bandits, etc.)
+            if hasattr(obs_space, "n"):
+                # preserve EXACT legacy encoding
+                out = np.stack([self.obs_adapter(o) for o in x]).astype(np.float32, copy=False)
+                return np.ascontiguousarray(out, dtype=np.float32)
+
+            # Fixed-shape image-like observations (MinAtar: HWC)
+            expected_hwc = tuple(obs_space.shape)  # (H,W,C) typically
+            if x.ndim == 4 and tuple(x.shape[1:]) == expected_hwc:
+                x = x.astype(np.float32, copy=False)
+                x = np.transpose(x, (0, 3, 1, 2))  # BCHW
+                return np.ascontiguousarray(x, dtype=np.float32)
+
+            # Already BCHW (rare, but safe)
+            if x.ndim == 4 and len(expected_hwc) == 3:
+                H, W, C = expected_hwc
+                if x.shape[1] == C and x.shape[2] == H and x.shape[3] == W:
+                    return np.ascontiguousarray(x.astype(np.float32, copy=False))
+
+            # Vector obs (B,D)
+            if x.ndim == 2:
+                return np.ascontiguousarray(x.astype(np.float32, copy=False))
+
+            # Fallback
+            out = np.stack([self.obs_adapter(o) for o in x]).astype(np.float32, copy=False)
+            return np.ascontiguousarray(out, dtype=np.float32)
+
+        # Mitigation logic
         if use_mitigation:
             include_self = bool(getattr(mit_cfg, "include_self", True))
             min_group = int(getattr(mit_cfg, "min_group", 1))
 
             if method == "sample":
-                # SAMPLE: replace outcome with a random sibling outcome (uniform over sibling indices)
                 repl_idx: List[Optional[int]] = []
                 valid_group_sizes = []
                 self_picks = 0
@@ -275,10 +344,10 @@ class DQNAgent:
                     if len(lst) < 1:
                         raise RuntimeError(f"SAMPLE invariant violated: by_sa[{key}] is empty for idx={idx}")
 
-                    # With include_self=True, we always can sample.
                     if (not include_self) and len(lst) <= 1:
-                        # If user config ever enables this, it creates mixtures. Treat as error.
-                        raise RuntimeError("SAMPLE with include_self=False and singleton groups creates mixture behavior. Use include_self=True.")
+                        raise RuntimeError(
+                            "SAMPLE with include_self=False and singleton groups creates mixture behavior. Use include_self=True."
+                        )
 
                     valid_draws += 1
                     valid_group_sizes.append(len(lst))
@@ -308,7 +377,6 @@ class DQNAgent:
                         batch["truncated"][bi] = fetched["truncated"][k]
                         used_indices[bi] = int(alt_idx)
 
-                # SAMPLE diagnostics
                 if used_indices is not None and batch.get("indices", None) is not None:
                     mit_sample_replace_frac = float(np.mean(used_indices != batch["indices"]))
                 if valid_draws > 0:
@@ -319,7 +387,6 @@ class DQNAgent:
                     mit_sample_group_size_mean = 0.0
 
             elif method == "avg":
-                # AVG: compute aggregated target_agg; next_obs not needed by loss afterwards
                 use_next_obs = False
                 max_group = int(getattr(mit_cfg, "max_group", 0))
                 gamma = float(self.cfg.agents.gamma)
@@ -331,17 +398,14 @@ class DQNAgent:
                     max_group=max_group,
                 )
 
-                # Avoid fallback mixtures: with include_self=True,min_group=1 groups must be non-empty.
                 for idx_i, g in zip(batch["indices"], groups):
                     if g is None or len(g) == 0:
                         raise RuntimeError(f"AVG invariant violated: empty sibling group for sampled idx={int(idx_i)}")
 
                 groups_used = [[int(x) for x in g] for g in groups]
                 group_sizes_used = np.array([len(g) for g in groups_used], dtype=np.int64)
+                mit_avg_valid_group_frac = 1.0
 
-                mit_avg_valid_group_frac = 1.0  # by invariant enforcement
-
-                # Deduplicate indices for one fetch + one forward pass
                 all_unique = np.unique(np.concatenate([np.asarray(g, dtype=np.int64) for g in groups_used]))
                 fetched = self.replay.fetch(all_unique)
 
@@ -354,11 +418,10 @@ class DQNAgent:
                     done_u = term_u
 
                 next_obs_u = fetched["next_obs"]
-                x_next_u = torch.as_tensor(
-                    np.stack([self.obs_adapter(o) for o in next_obs_u]),
-                    dtype=torch.float32,
-                    device=self.device,
-                )
+
+                x_next_np = _adapt_obs_batch_np(next_obs_u)
+                x_next_u = torch.from_numpy(x_next_np).to(self.device)
+
                 if self.model_type == "mlp":
                     x_next_u = x_next_u.view(x_next_u.size(0), -1)
 
@@ -366,35 +429,27 @@ class DQNAgent:
                     q_online = self.q_net(x_next_u)
                     a_star = q_online.argmax(dim=1)
                     q_tgt = self.target_q_net(x_next_u)
-                    v_u = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1).cpu().numpy()
+                    v_u = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1).detach().cpu().numpy()
 
                 targets_u = rewards_u + (1.0 - done_u) * gamma * v_u
-
-                # Map unique index -> row in targets_u
                 pos = {int(idx): k for k, idx in enumerate(fetched["indices"])}
 
                 B = len(batch["indices"])
                 target_agg = np.empty((B,), dtype=np.float32)
                 var_list = []
-
                 for i, g in enumerate(groups_used):
                     t = np.asarray([targets_u[pos[int(j)]] for j in g], dtype=np.float32)
                     target_agg[i] = float(t.mean())
                     var_list.append(float(np.var(t)))
 
                 batch["target_agg"] = target_agg
-
-                # Expose groups used so train() can update priorities consistently when update_all_siblings=True
                 batch["mit_avg_groups_used"] = groups_used
-
-                # Diagnostics
                 batch["mit_unique_sibling_indices"] = int(all_unique.size)
                 batch["mit_total_sibling_refs"] = int(sum(len(g) for g in groups_used))
                 batch["mit_target_var_mean"] = float(np.mean(var_list)) if var_list else 0.0
                 batch["mit_target_var_max"] = float(np.max(var_list)) if var_list else 0.0
 
             elif method == "model":
-                # MODEL: replace outcome by sampling from tabular empirical model
                 for bi, (s_raw, a_raw) in enumerate(zip(batch["obs"], batch["actions"])):
                     s = int(np.asarray(s_raw).reshape(()))
                     a = int(a_raw)
@@ -406,32 +461,26 @@ class DQNAgent:
                         batch["truncated"][bi],
                     )
 
-                    s_next, r_new, term_new, trunc_new = self.env_model.sample(
-                        s=s, a=a, default=default
-                    )
-
+                    s_next, r_new, term_new, trunc_new = self.env_model.sample(s=s, a=a, default=default)
                     batch["next_obs"][bi] = s_next
                     batch["rewards"][bi] = r_new
                     batch["terminated"][bi] = term_new
                     batch["truncated"][bi] = trunc_new
 
-        # Build tensors
-        obs = torch.as_tensor(
-            np.stack([self.obs_adapter(o) for o in batch["obs"]]),
-            dtype=torch.float32, device=self.device
-        )
+        # Build tensors (safe for ALL envs)
+        obs_np = _adapt_obs_batch_np(batch["obs"])
+        obs_t = torch.from_numpy(obs_np).to(self.device)
+
         if use_next_obs:
-            next_obs = torch.as_tensor(
-                np.stack([self.obs_adapter(o) for o in batch["next_obs"]]),
-                dtype=torch.float32, device=self.device
-            )
+            next_obs_np = _adapt_obs_batch_np(batch["next_obs"])
+            next_obs_t = torch.from_numpy(next_obs_np).to(self.device)
         else:
-            next_obs = torch.empty(0, device=self.device)
+            next_obs_t = torch.empty(0, device=self.device)
 
         if self.model_type == "mlp":
-            obs = obs.view(obs.size(0), -1)
+            obs_t = obs_t.view(obs_t.size(0), -1)
             if use_next_obs:
-                next_obs = next_obs.view(next_obs.size(0), -1)
+                next_obs_t = next_obs_t.view(next_obs_t.size(0), -1)
 
         actions = torch.as_tensor(batch["actions"], dtype=torch.long, device=self.device)
         rewards = torch.as_tensor(batch["rewards"], dtype=torch.float32, device=self.device)
@@ -447,7 +496,7 @@ class DQNAgent:
         group_stats = None
 
         if weights_np is None:
-            weights = torch.ones((obs.shape[0],), dtype=torch.float32, device=self.device)
+            weights = torch.ones((obs_t.shape[0],), dtype=torch.float32, device=self.device)
         else:
             use_group_is = (
                 self.is_per and use_mitigation and method in ("sample", "avg", "model")
@@ -469,10 +518,10 @@ class DQNAgent:
         indices = batch.get("indices", None)
 
         out: Dict[str, Any] = dict(
-            obs=obs,
+            obs=obs_t,
             actions=actions,
             rewards=rewards,
-            next_obs=next_obs,
+            next_obs=next_obs_t,
             terminated=terminated,
             truncated=truncated,
             weights=weights,
@@ -483,19 +532,16 @@ class DQNAgent:
 
         if weights_raw is not None:
             out["weights_raw"] = weights_raw
-
         if group_stats is not None:
             out["_group_stats"] = group_stats
 
-        # AVG artifacts
         if group_sizes_used is not None:
             out["group_sizes_used"] = torch.as_tensor(group_sizes_used, dtype=torch.float32, device=self.device)
         if "target_agg" in batch:
             out["target_agg"] = torch.as_tensor(batch["target_agg"], dtype=torch.float32, device=self.device)
         if "mit_avg_groups_used" in batch:
-            out["mit_avg_groups_used"] = batch["mit_avg_groups_used"]  # python list[list[int]]
+            out["mit_avg_groups_used"] = batch["mit_avg_groups_used"]
 
-        # Additional mitigation metrics payload
         if "mit_unique_sibling_indices" in batch:
             out["mit_unique_sibling_indices"] = int(batch["mit_unique_sibling_indices"])
             out["mit_total_sibling_refs"] = int(batch["mit_total_sibling_refs"])
@@ -503,23 +549,20 @@ class DQNAgent:
             out["mit_target_var_max"] = float(batch.get("mit_target_var_max", 0.0))
 
         if mit_avg_valid_group_frac is not None:
-            out["mit_avg_valid_group_frac"] = float(mit_avg_valid_group_frac)
-
+            out["mit/avg_valid_group_frac"] = float(mit_avg_valid_group_frac)
         if mit_sample_replace_frac is not None:
-            out["mit_sample_replace_frac"] = float(mit_sample_replace_frac)
+            out["mit/sample_replace_frac"] = float(mit_sample_replace_frac)
         if mit_sample_self_frac is not None:
-            out["mit_sample_self_frac"] = float(mit_sample_self_frac)
+            out["mit/sample_self_frac"] = float(mit_sample_self_frac)
         if mit_sample_group_size_mean is not None:
-            out["mit_sample_group_size_mean"] = float(mit_sample_group_size_mean)
+            out["mit/sample_group_size_mean"] = float(mit_sample_group_size_mean)
 
-        # Track replay action distribution
+        # Replay action distribution
         act_np = actions.detach().cpu().numpy()
         binc = np.bincount(act_np, minlength=self.n_actions)
         self.sample_counts[:self.n_actions] += binc
 
         # Within-group distortion diagnostics
-        # Interpretable mainly for SAMPLE (because used_indices differs); for PER/MODEL/AVG it
-        # still measures "how concentrated PER is within group" on sampled indices.
         if self.is_per and indices is not None and used_indices is not None and hasattr(self.replay, "within_group_used_ratio"):
             sampled_idx = np.asarray(indices, dtype=np.int64)
             used_idx = np.asarray(used_indices, dtype=np.int64)
@@ -809,9 +852,7 @@ class DQNAgent:
                     batch = self._sample_batch()
                     _loss, logs = self.algo.compute_loss(batch, self.optimizer)
 
-                    # -------------------------
                     # PER priority updates
-                    # -------------------------
                     if self.is_per and batch.get("indices", None) is not None and "td_errors" in logs:
                         td_abs = logs["td_errors"].detach().abs().cpu().numpy().astype(np.float32)
                         eps_prio = float(self.cfg.agents.replay.eps)
@@ -821,14 +862,10 @@ class DQNAgent:
                         method = str(getattr(mit_cfg, "method", "none")).lower() if mit_cfg else "none"
                         update_all = bool(getattr(mit_cfg, "update_all_siblings", False)) if mit_cfg else False
 
-                        # By default: update the indices that correspond to the TD error used.
-                        # SAMPLE: used_indices; AVG/MODEL/PER: indices
                         upd_indices = batch.get("used_indices", batch["indices"])
                         upd_indices = np.asarray(upd_indices, dtype=np.int64)
 
                         if update_all and method == "avg":
-                            # Update priorities for the exact sibling subset used in averaging (size ~= max_group),
-                            # using the *same* |delta_avg| (wrt target_agg) for all those siblings.
                             groups_used = batch.get("mit_avg_groups_used", None)
                             if groups_used is None:
                                 self.replay.update_priorities(upd_indices, prios)
@@ -845,10 +882,9 @@ class DQNAgent:
                                 prio_list = [prio_map[k] for k in idx_list]
                                 self.replay.update_priorities(idx_list, prio_list)
                         else:
-                            # Default behavior: only update sampled/used transitions
                             self.replay.update_priorities(upd_indices, prios)
 
-                    # Logging
+                    # Logging (only here!)
                     if self.global_step % self.cfg.agents.log_interval_steps == 0:
                         metrics: Dict[str, Any] = {
                             "train/loss": float(logs["loss"]),
@@ -901,37 +937,7 @@ class DQNAgent:
                             metrics["is/group_base_mean"] = float(np.mean(base))
                             metrics["is/group_base_max"] = float(np.max(base))
 
-                        # Mitigation diagnostics
-                        group_sizes_used = batch.get("group_sizes_used", None)
-                        if group_sizes_used is not None:
-                            gs_np = group_sizes_used.detach().cpu().numpy()
-                            if gs_np.size > 0:
-                                metrics["mit/group_size_used_mean"] = float(gs_np.mean())
-                                metrics["mit/group_size_used_max"] = float(gs_np.max())
-
-                        if "mit_avg_valid_group_frac" in batch:
-                            metrics["mit/avg_valid_group_frac"] = float(batch["mit_avg_valid_group_frac"])
-
-                        if "mit_sample_replace_frac" in batch:
-                            metrics["mit/sample_replace_frac"] = float(batch["mit_sample_replace_frac"])
-                        if "mit_sample_self_frac" in batch:
-                            metrics["mit/sample_self_frac"] = float(batch["mit_sample_self_frac"])
-                        if "mit_sample_group_size_mean" in batch:
-                            metrics["mit/sample_group_size_mean"] = float(batch["mit_sample_group_size_mean"])
-
-                        if "mit_unique_sibling_indices" in batch:
-                            uniq = float(batch["mit_unique_sibling_indices"])
-                            total_refs = float(batch["mit_total_sibling_refs"])
-                            metrics["mit/unique_sibling_indices"] = uniq
-                            metrics["mit/total_sibling_refs"] = total_refs
-                            metrics["mit/overhead_factor"] = uniq / float(self.cfg.agents.replay.batch_size)
-
-                        tv_mean = batch.get("mit_target_var_mean", None)
-                        if tv_mean is not None:
-                            metrics["mit/target_var_mean"] = float(tv_mean)
-                            metrics["mit/target_var_max"] = float(batch.get("mit_target_var_max", 0.0))
-
-                        # Within-group distortion metrics (added in _sample_batch)
+                        # Mitigation diagnostics already attached in batch
                         for k in [
                             "mit/within_group_ratio_mean",
                             "mit/within_group_ratio_std",
@@ -940,6 +946,9 @@ class DQNAgent:
                         ]:
                             if k in batch:
                                 metrics[k] = float(batch[k])
+
+                        if "mit/avg_valid_group_frac" in batch:
+                            metrics["mit/avg_valid_group_frac"] = float(batch["mit/avg_valid_group_frac"])
 
                         # Policy/replay action fractions (guarded)
                         if self.n_actions <= self._max_action_frac_logs:
@@ -953,55 +962,8 @@ class DQNAgent:
                                 for a_idx in range(self.n_actions):
                                     metrics[f"replay/frac_samples_action_{a_idx}"] = float(self.sample_counts[a_idx]) / float(total_samples)
 
-                        # Bandit diagnostics
-                        if self._is_bandit_env:
-                            b = self._compute_bandit_metrics()
-                            metrics.update(b)
-
-                            # time-to-threshold
-                            mse = b.get("bandit/mse_q_true", None)
-                            # default threshold; you can make it config-driven if you want
-                            mse_thr = float(getattr(getattr(self.cfg.agents, "logging", None), "bandit_mse_threshold", 1e-3))
-                            if mse is not None and self._bandit_tt_mse is None and mse <= mse_thr:
-                                self._bandit_tt_mse = int(self.global_step)
-                            if self._bandit_tt_mse is not None:
-                                metrics["bandit/tt_mse"] = float(self._bandit_tt_mse)
-                                metrics["bandit/mse_threshold"] = float(mse_thr)
-
-                            # trapezoid AUC over env steps at log points 
-                            cur_step = int(self.global_step)
-                            if self._last_bandit_step is not None:
-                                dt = float(cur_step - self._last_bandit_step)
-                                if dt > 0:
-                                    # MSE AUC
-                                    if self._last_bandit_mse is not None and mse is not None:
-                                        self._bandit_auc_mse += 0.5 * (self._last_bandit_mse + float(mse)) * dt
-                                    # MAE AUC
-                                    mae = b.get("bandit/mae_q_true", None)
-                                    if self._last_bandit_mae is not None and mae is not None:
-                                        self._bandit_auc_mae += 0.5 * (self._last_bandit_mae + float(mae)) * dt
-                                    # Q-range AUC (useful in conal case)
-                                    q_range = b.get("bandit/q_range", None)
-                                    if self._last_bandit_q_range is not None and q_range is not None:
-                                        self._bandit_auc_q_range += 0.5 * (self._last_bandit_q_range + float(q_range)) * dt
-                                    # Greedy sigma AUC (optional “variance attraction” diagnostic)
-                                    gs = b.get("bandit/greedy_arm_sigma", None)
-                                    if self._last_bandit_greedy_sigma is not None and gs is not None and np.isfinite(gs):
-                                        self._bandit_auc_greedy_sigma += 0.5 * (self._last_bandit_greedy_sigma + float(gs)) * dt
-
-                            # Update last values
-                            self._last_bandit_step = cur_step
-                            self._last_bandit_mse = float(mse) if mse is not None else None
-                            self._last_bandit_mae = float(b.get("bandit/mae_q_true", 0.0))
-                            self._last_bandit_q_range = float(b.get("bandit/q_range", 0.0))
-                            gs_now = b.get("bandit/greedy_arm_sigma", float("nan"))
-                            self._last_bandit_greedy_sigma = float(gs_now) if np.isfinite(gs_now) else None
-
-                            # Log AUCs
-                            metrics["bandit/auc_mse_q_true"] = float(self._bandit_auc_mse)
-                            metrics["bandit/auc_mae_q_true"] = float(self._bandit_auc_mae)
-                            metrics["bandit/auc_q_range"] = float(self._bandit_auc_q_range)
-                            metrics["bandit/auc_greedy_arm_sigma"] = float(self._bandit_auc_greedy_sigma)
+                        # Grouping metrics (ONLY here, and actually logged)
+                        metrics.update(self._grouping_metrics())
 
                         log_metrics(metrics, step=self.global_step)
 
@@ -1015,7 +977,6 @@ class DQNAgent:
                             },
                         })
 
-                        # Replay debug snapshot
                         debug = getattr(self.replay, "debug_snapshot", lambda: None)()
                         if debug is not None:
                             prios_dbg = debug.get("debug_priorities", [])
