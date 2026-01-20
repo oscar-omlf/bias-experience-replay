@@ -214,9 +214,10 @@ outputs/
 results/
 old_results/
 artifacts/
+logs/
+old_logs/
+old_old_results/
 
 commit.txt
 *.zip
 *.sh
-
-logs/

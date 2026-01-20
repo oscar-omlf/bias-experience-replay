@@ -155,28 +155,36 @@ class DQNAgent:
 
 
     # Terminal success helpers
-    def _terminal_kind(self, obs) -> Optional[str]:
+    def _terminal_kind(self, obs, env=None) -> Optional[str]:
         """
         Returns:
-          "goal" if terminal obs corresponds to goal state,
-          "hole" if terminal obs corresponds to hole state,
-          None if unknown or not a goal/hole env.
+        "goal" if terminal obs corresponds to goal state,
+        "hole" if terminal obs corresponds to hole state,
+        None if unknown / not applicable / observation isn't scalar-discrete.
         """
-        s = int(np.asarray(obs).reshape(()))
-        base = self.env.unwrapped
+        # Use the provided env (eval_env in evaluation), otherwise default to training env
+        base_env = (env if env is not None else self.env).unwrapped
+
+        arr = np.asarray(obs)
+
+        # If obs isn't scalar-discrete, we can't classify goal/hole here
+        if arr.ndim != 0:
+            return None
+
+        s = int(arr.reshape(()))
 
         # TwoChains-style
-        if hasattr(base, "G") and hasattr(base, "H"):
-            if s == int(base.G):
+        if hasattr(base_env, "G") and hasattr(base_env, "H"):
+            if s == int(base_env.G):
                 return "goal"
-            if s == int(base.H):
+            if s == int(base_env.H):
                 return "hole"
             return None
 
-        # FrozenLake-style (desc is a grid of bytes)
-        if hasattr(base, "desc") and hasattr(base, "ncol"):
-            desc = np.asarray(base.desc)
-            ncol = int(base.ncol)
+        # FrozenLake-style
+        if hasattr(base_env, "desc") and hasattr(base_env, "ncol"):
+            desc = np.asarray(base_env.desc)
+            ncol = int(base_env.ncol)
             r, c = divmod(s, ncol)
             tile = desc[r, c]
             if tile == b"G" or tile == "G":
@@ -187,8 +195,8 @@ class DQNAgent:
 
         return None
 
-    def _is_goal(self, obs) -> bool:
-        return self._terminal_kind(obs) == "goal"
+    def _is_goal(self, obs, env=None) -> bool:
+        return self._terminal_kind(obs, env=env) == "goal"
 
     # Obs / action
     def _encode_obs(self, obs):
@@ -237,32 +245,32 @@ class DQNAgent:
     def _grouping_metrics(self) -> Dict[str, float]:
         """
         Logs whether latent grouping is active and whether buckets are usable.
+
+        IMPORTANT: grouping_stats() can be expensive; only compute it when grouping is enabled.
         """
         out: Dict[str, float] = {}
 
         if not self.is_per:
             return out
 
-        # Is grouping enabled?
         grouping = getattr(self.cfg.agents.replay, "grouping", None)
         enabled = bool(getattr(grouping, "enabled", False)) if grouping is not None else False
         out["grouping/enabled"] = float(enabled)
 
-        # If PER replay exposes stats
-        if hasattr(self.replay, "grouping_stats"):
-            try:
-                out.update(self.replay.grouping_stats(n_actions=self.n_actions))
-            except Exception as e:
-                out["grouping/stats_error"] = 1.0
-                out["grouping/stats_error_type"] = float(1.0)  # keep numeric; error text goes to stdout
-                print(f"[grouping] failed to compute grouping_stats: {type(e).__name__}: {e}")
+        # Only compute these if grouping is actually enabled
+        if enabled:
+            if hasattr(self.replay, "grouping_stats"):
+                try:
+                    out.update(self.replay.grouping_stats(n_actions=self.n_actions))
+                except Exception as e:
+                    out["grouping/stats_error"] = 1.0
+                    print(f"[grouping] failed to compute grouping_stats: {type(e).__name__}: {e}")
 
-        # Keyer stats (cache hit rate, etc.)
-        keyer = getattr(self.replay, "keyer", None)
-        if keyer is not None and hasattr(keyer, "stats"):
-            ks = keyer.stats()
-            for k, v in ks.items():
-                out[f"grouping/keyer_{k}"] = float(v)
+            keyer = getattr(self.replay, "keyer", None)
+            if keyer is not None and hasattr(keyer, "stats"):
+                ks = keyer.stats()
+                for k, v in ks.items():
+                    out[f"grouping/keyer_{k}"] = float(v)
 
         return out
 
@@ -577,7 +585,6 @@ class DQNAgent:
 
     # Bandit diagnostics
     @torch.no_grad()
-    @torch.no_grad()
     def _compute_bandit_metrics(self) -> Dict[str, float]:
         env_base = self.env.unwrapped
         if not hasattr(env_base, "true_means"):
@@ -709,8 +716,7 @@ class DQNAgent:
             returns.append(ep_ret)
             lengths.append(ep_len)
 
-            # Standard success: goal vs hole if detectable, else ep_ret>0 fallback
-            kind = self._terminal_kind(obs)
+            kind = self._terminal_kind(obs, env=self.eval_env)
             if kind is None:
                 successes.append(1 if ep_ret > 0 else 0)
             else:
@@ -730,48 +736,38 @@ class DQNAgent:
         q10, q50, q90 = [float(x) for x in np.quantile(ret, [0.10, 0.50, 0.90])] if ret.size > 0 else (0.0, 0.0, 0.0)
         success_any = float(np.max(succ)) if succ.size > 0 else 0.0
 
-        # time-to-first eval goal
         if self.first_eval_goal_step is None and success_any > 0.0:
             self.first_eval_goal_step = int(self.global_step)
 
-        # --- AUC updates (trapezoid rule in env steps) ---
         if self._last_eval_step is not None and self._last_eval_success is not None and self._last_eval_return is not None:
             dt = float(self.global_step - self._last_eval_step)
             if dt > 0:
                 self._eval_auc_success += 0.5 * (self._last_eval_success + success_rate) * dt
                 self._eval_auc_return += 0.5 * (self._last_eval_return + return_mean) * dt
 
-                # Portal-taken AUC (episode-level rate, in [0,1])
                 if pt is not None:
                     portal_taken_rate = float(np.mean(pt)) if pt.size > 0 else 0.0
                     if self._last_eval_portal_taken is not None:
                         self._eval_auc_portal_taken += 0.5 * (self._last_eval_portal_taken + portal_taken_rate) * dt
 
-        # Update last eval point fields
         self._last_eval_step = int(self.global_step)
         self._last_eval_success = float(success_rate)
         self._last_eval_return = float(return_mean)
 
-        # Portal taken rate (episode-level)
         portal_taken_rate = float(np.mean(pt)) if pt is not None and pt.size > 0 else 0.0
         self._last_eval_portal_taken = float(portal_taken_rate)
 
-        # Portal use rate (visit-level)
         portal_use_rate = float(portal_taken_visits) / float(portal_visits + 1e-12) if is_portal_env else float("nan")
 
-        # --- Portal TT + flips ---
-        # Configure threshold and consecutive requirement (optional config knobs)
         log_cfg = getattr(self.cfg.agents, "logging", None)
         thr = float(getattr(log_cfg, "portal_tt_threshold", 0.95)) if log_cfg is not None else 0.95
         K = int(getattr(log_cfg, "portal_tt_consecutive", 2)) if log_cfg is not None else 2
 
-        # Binary route decision at checkpoint (use portal_taken_rate, usually near 0 or 1 for greedy eval)
         portal_binary = 1 if portal_taken_rate >= 0.5 else 0
         if self._last_portal_binary is not None and portal_binary != self._last_portal_binary:
             self._portal_flip_count += 1
         self._last_portal_binary = portal_binary
 
-        # streak toward TT
         if portal_taken_rate >= thr:
             self._portal_tt_streak += 1
         else:
@@ -780,7 +776,6 @@ class DQNAgent:
         if self._portal_tt_step is None and self._portal_tt_streak >= K:
             self._portal_tt_step = int(self.global_step)
 
-        # Interpret AUC as integral over steps; dividing by steps gives mean-over-training.
         denom = float(max(1, self.global_step))
         auc_success_avg = float(self._eval_auc_success / denom)
         auc_return_avg = float(self._eval_auc_return / denom)
@@ -797,20 +792,16 @@ class DQNAgent:
             "eval/episode_length": ep_len_mean,
             "eval/auc_success": float(self._eval_auc_success),
             "eval/auc_return": float(self._eval_auc_return),
-
-            # Key “table-friendly” scalars:
-            "eval/auc_success_avg": auc_success_avg,   # in [0,1]
-            "eval/auc_return_avg": auc_return_avg,     # average return over training
+            "eval/auc_success_avg": auc_success_avg,
+            "eval/auc_return_avg": auc_return_avg,
         }
 
         if is_portal_env:
             metrics.update({
-                "eval/portal_taken_rate": float(portal_taken_rate),   # episode-level
-                "eval/portal_use_rate": float(portal_use_rate),       # visit-level
+                "eval/portal_taken_rate": float(portal_taken_rate),
+                "eval/portal_use_rate": float(portal_use_rate),
                 "eval/portal_auc_taken": float(self._eval_auc_portal_taken),
-                "eval/portal_auc_taken_avg": float(portal_auc_taken_avg),  # in [0,1]
-
-                # Time-to-threshold + stability
+                "eval/portal_auc_taken_avg": float(portal_auc_taken_avg),
                 "eval/portal_flip_count": float(self._portal_flip_count),
                 "eval/portal_tt_threshold": float(thr),
                 "eval/portal_tt_consecutive": float(K),
@@ -901,8 +892,24 @@ class DQNAgent:
                             td = logs["td_errors"].detach().cpu().numpy()
                             metrics["train/td_error_std"] = float(np.std(td))
                             metrics["train/td_error_max_abs"] = float(np.max(np.abs(td)))
+
                             if wandb.run is not None:
-                                metrics["train/td_error_hist"] = wandb.Histogram(td)
+                                td_f = np.asarray(td, dtype=np.float64)
+                                td_f = td_f[np.isfinite(td_f)]
+
+                                if td_f.size > 0:
+                                    try:
+                                        # Old behavior (what you said worked): let wandb decide bins/range
+                                        metrics["train/td_error_hist"] = wandb.Histogram(td_f)
+                                    except Exception as e:
+                                        # Fallback: single-bin histogram around median (always valid)
+                                        c = float(np.median(td_f))
+                                        # width: nonzero in float64 even if c is huge/small
+                                        width = max(1e-6, np.finfo(np.float64).eps * max(1.0, abs(c)) * 1024.0)
+                                        hist = np.array([int(td_f.size)], dtype=np.int64)
+                                        edges = np.array([c - width, c + width], dtype=np.float64)
+                                        metrics["train/td_error_hist"] = wandb.Histogram(np_histogram=(hist, edges))
+
 
                         # IS weight diagnostics
                         w = batch["weights"].detach().cpu().numpy()
@@ -943,12 +950,32 @@ class DQNAgent:
                             "mit/within_group_ratio_std",
                             "mit/within_group_pper_mean",
                             "mit/within_group_punif_mean",
+                            "mit/sample_replace_frac",
+                            "mit/sample_self_frac",
+                            "mit/sample_group_size_mean",
+                            "mit/avg_valid_group_frac",
                         ]:
                             if k in batch:
                                 metrics[k] = float(batch[k])
 
-                        if "mit/avg_valid_group_frac" in batch:
-                            metrics["mit/avg_valid_group_frac"] = float(batch["mit/avg_valid_group_frac"])
+                        # AVG-specific: group_sizes_used is a tensor
+                        if "group_sizes_used" in batch:
+                            gs_np = batch["group_sizes_used"].detach().cpu().numpy()
+                            if gs_np.size > 0:
+                                metrics["mit/group_size_used_mean"] = float(gs_np.mean())
+                                metrics["mit/group_size_used_max"] = float(gs_np.max())
+
+                        # AVG internals: your batch uses underscore keys, so map them to slash keys for W&B
+                        if "mit_unique_sibling_indices" in batch:
+                            uniq = float(batch["mit_unique_sibling_indices"])
+                            total_refs = float(batch.get("mit_total_sibling_refs", 0.0))
+                            metrics["mit/unique_sibling_indices"] = uniq
+                            metrics["mit/total_sibling_refs"] = total_refs
+                            metrics["mit/overhead_factor"] = uniq / float(self.cfg.agents.replay.batch_size)
+
+                        if "mit_target_var_mean" in batch:
+                            metrics["mit/target_var_mean"] = float(batch["mit_target_var_mean"])
+                            metrics["mit/target_var_max"] = float(batch.get("mit_target_var_max", 0.0))
 
                         # Policy/replay action fractions (guarded)
                         if self.n_actions <= self._max_action_frac_logs:
@@ -962,7 +989,52 @@ class DQNAgent:
                                 for a_idx in range(self.n_actions):
                                     metrics[f"replay/frac_samples_action_{a_idx}"] = float(self.sample_counts[a_idx]) / float(total_samples)
 
-                        # Grouping metrics (ONLY here, and actually logged)
+                        # -------------------------
+                        # Bandit diagnostics (if env provides true_means)
+                        # -------------------------
+                        if self._is_bandit_env:
+                            b = self._compute_bandit_metrics()
+                            metrics.update(b)
+
+                            mse = b.get("bandit/mse_q_true", None)
+                            mae = b.get("bandit/mae_q_true", None)
+                            q_range = b.get("bandit/q_range", None)
+                            gs_now = b.get("bandit/greedy_arm_sigma", None)
+
+                            log_cfg = getattr(self.cfg.agents, "logging", None)
+                            mse_thr = float(getattr(log_cfg, "bandit_mse_threshold", 1e-3)) if log_cfg is not None else 1e-3
+
+                            if mse is not None and self._bandit_tt_mse is None and float(mse) <= mse_thr:
+                                self._bandit_tt_mse = int(self.global_step)
+                            if self._bandit_tt_mse is not None:
+                                metrics["bandit/tt_mse"] = float(self._bandit_tt_mse)
+                                metrics["bandit/mse_threshold"] = float(mse_thr)
+
+                            cur_step = int(self.global_step)
+                            if self._last_bandit_step is not None:
+                                dt = float(cur_step - int(self._last_bandit_step))
+                                if dt > 0:
+                                    if self._last_bandit_mse is not None and mse is not None:
+                                        self._bandit_auc_mse += 0.5 * (float(self._last_bandit_mse) + float(mse)) * dt
+                                    if self._last_bandit_mae is not None and mae is not None:
+                                        self._bandit_auc_mae += 0.5 * (float(self._last_bandit_mae) + float(mae)) * dt
+                                    if self._last_bandit_q_range is not None and q_range is not None:
+                                        self._bandit_auc_q_range += 0.5 * (float(self._last_bandit_q_range) + float(q_range)) * dt
+                                    if self._last_bandit_greedy_sigma is not None and gs_now is not None and np.isfinite(float(gs_now)):
+                                        self._bandit_auc_greedy_sigma += 0.5 * (float(self._last_bandit_greedy_sigma) + float(gs_now)) * dt
+
+                            self._last_bandit_step = cur_step
+                            self._last_bandit_mse = float(mse) if mse is not None else None
+                            self._last_bandit_mae = float(mae) if mae is not None else None
+                            self._last_bandit_q_range = float(q_range) if q_range is not None else None
+                            self._last_bandit_greedy_sigma = float(gs_now) if (gs_now is not None and np.isfinite(float(gs_now))) else None
+
+                            metrics["bandit/auc_mse_q_true"] = float(self._bandit_auc_mse)
+                            metrics["bandit/auc_mae_q_true"] = float(self._bandit_auc_mae)
+                            metrics["bandit/auc_q_range"] = float(self._bandit_auc_q_range)
+                            metrics["bandit/auc_greedy_arm_sigma"] = float(self._bandit_auc_greedy_sigma)
+
+                        # Grouping metrics
                         metrics.update(self._grouping_metrics())
 
                         log_metrics(metrics, step=self.global_step)
@@ -1031,7 +1103,12 @@ class DQNAgent:
     @torch.no_grad()
     def compute_q_values_all_states(self) -> np.ndarray:
         obs_space = self.env.observation_space
-        n_states = obs_space.n
+        if not hasattr(obs_space, "n"):
+            raise ValueError(
+                f"compute_q_values_all_states() only supports Discrete obs spaces; got {obs_space}."
+            )
+
+        n_states = int(obs_space.n)
         q_table = np.zeros((n_states, self.n_actions), dtype=np.float32)
 
         for s in range(n_states):

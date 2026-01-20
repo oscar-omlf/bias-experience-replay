@@ -1,5 +1,5 @@
 import random
-from typing import Dict, Sequence, List, Optional
+from typing import Dict, Sequence, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
 from .base import ReplayBuffer
