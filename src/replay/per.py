@@ -245,12 +245,11 @@ class PrioritizedReplayBuffer(ReplayBuffer):
                     lst.pop()
                     self.idx_to_pos[self.pos] = -1
                 else:
-                    # Fallback to linear search if something went wrong
-                    try:
-                        lst.remove(self.pos)
-                    except ValueError:
-                        pass
-                    self.idx_to_pos[self.pos] = -1
+                    raise RuntimeError(
+                        f"[PER] Fallback removal triggered at pos={self.pos}. "
+                        f"old_key={old_key}, recorded_pos={int(self.idx_to_pos[self.pos])}, "
+                        f"lst_len={len(lst)}, lst_at_recorded={(int(lst[p]) if 0 <= p < len(lst) else None)}"
+                    )
 
                 if len(lst) == 0:
                     self.by_sa.pop(old_key, None)

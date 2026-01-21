@@ -1,7 +1,7 @@
-id: FrozenLake-C
+id: FrozenLake-Z
 is_slippery: true
 map_name: "8x8" # 4x4 or 8x8
-success_rate: 0.95
-reward_schedule: [20.0, -100, -0.01]
+# success_rate: 0.95
+# reward_schedule: [20.0, -100, -0.01]
 max_episode_steps: 200
 render_mode: null # null | "human" | "ansi"

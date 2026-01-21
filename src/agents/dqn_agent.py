@@ -277,7 +277,7 @@ class DQNAgent:
     def _sample_batch(self) -> Dict[str, Any]:
         batch = self.replay.sample(self.cfg.agents.replay.batch_size)
 
-        obs_space = self.env.observation_space  # <-- IMPORTANT: define once for all branches
+        obs_space = self.env.observation_space  # define once for all branches
 
         mit_cfg = self.mit_cfg
         use_mitigation = (self.is_per and mit_cfg is not None and bool(mit_cfg.enabled))
@@ -298,7 +298,7 @@ class DQNAgent:
         def _adapt_obs_batch_np(obs_batch_np: Any) -> np.ndarray:
             """
             Returns float32 numpy batch in the format the network expects:
-            - Discrete envs: uses obs_adapter (keeps legacy behavior perfectly)
+            - Discrete envs: uses obs_adapter (keeps legacy behavior)
             - Image envs with fixed HWC: vectorized HWC->CHW
             - Fallback: obs_adapter per item
             """
@@ -306,18 +306,17 @@ class DQNAgent:
 
             # Discrete scalar observations (FrozenLake, bandits, etc.)
             if hasattr(obs_space, "n"):
-                # preserve EXACT legacy encoding
                 out = np.stack([self.obs_adapter(o) for o in x]).astype(np.float32, copy=False)
                 return np.ascontiguousarray(out, dtype=np.float32)
 
             # Fixed-shape image-like observations (MinAtar: HWC)
-            expected_hwc = tuple(obs_space.shape)  # (H,W,C) typically
+            expected_hwc = tuple(obs_space.shape)  # (H,W,C)
             if x.ndim == 4 and tuple(x.shape[1:]) == expected_hwc:
                 x = x.astype(np.float32, copy=False)
                 x = np.transpose(x, (0, 3, 1, 2))  # BCHW
                 return np.ascontiguousarray(x, dtype=np.float32)
 
-            # Already BCHW (rare, but safe)
+            # Already BCHW (rare)
             if x.ndim == 4 and len(expected_hwc) == 3:
                 H, W, C = expected_hwc
                 if x.shape[1] == C and x.shape[2] == H and x.shape[3] == W:
@@ -379,10 +378,25 @@ class DQNAgent:
                         if alt_idx is None:
                             continue
                         k = row_of[int(alt_idx)]
+                        # SAFETY: action should match because grouping key includes action
+                        if int(fetched["actions"][k]) != int(batch["actions"][bi]):
+                            raise RuntimeError(
+                                f"SAMPLE invariant violated: alt action mismatch. "
+                                f"batch_a={int(batch['actions'][bi])}, alt_a={int(fetched['actions'][k])}, "
+                                f"idx={int(batch['indices'][bi])}, alt_idx={int(alt_idx)}"
+                            )
+
+                        # IMPORTANT FIX:
+                        # Swap obs as well, so we truly train on transition j (alt_idx),
+                        # especially needed for latent grouping where obs_i != obs_j.
+                        batch["obs"][bi] = fetched["obs"][k]
+
+                        # Swap outcome fields (as before)
                         batch["next_obs"][bi] = fetched["next_obs"][k]
                         batch["rewards"][bi] = fetched["rewards"][k]
                         batch["terminated"][bi] = fetched["terminated"][k]
                         batch["truncated"][bi] = fetched["truncated"][k]
+
                         used_indices[bi] = int(alt_idx)
 
                 if used_indices is not None and batch.get("indices", None) is not None:
@@ -511,7 +525,11 @@ class DQNAgent:
                 and hasattr(self.replay, "compute_group_is_weights")
             )
             if use_group_is:
-                gw_raw, n_g, s_g, S, n = self.replay.compute_group_is_weights(batch["indices"], normalize=False)
+                # IMPORTANT: for SAMPLE, we now truly train on used_indices (j),
+                # so compute group weights from used_indices (safe and clearer).
+                is_idx = used_indices if (method == "sample" and used_indices is not None) else batch["indices"]
+
+                gw_raw, n_g, s_g, S, n = self.replay.compute_group_is_weights(is_idx, normalize=False)
                 gw_raw = np.asarray(gw_raw, dtype=np.float32)
                 gw = gw_raw / (float(np.max(gw_raw)) + 1e-12)
 

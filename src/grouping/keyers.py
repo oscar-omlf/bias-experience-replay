@@ -122,21 +122,23 @@ class VQVAEKeyer(GroupKeyer):
     def _obs_to_bchw(self, obs: Any) -> torch.Tensor:
         x = np.asarray(obs, dtype=np.float32)
 
-        # Expect 3D image
         if x.ndim != 3:
             raise ValueError(f"VQVAEKeyer expects 3D obs; got {x.shape}")
 
-        # Detect CHW vs HWC by channel count
-        # - If first dim equals in_channels -> assume CHW
-        # - Else assume HWC
-        if int(x.shape[0]) == int(self.in_channels):
-            chw = x
-        else:
-            # HWC -> CHW
-            chw = np.transpose(x, (2, 0, 1))
+        C, H, W = self.obs_shape
 
-        t = torch.from_numpy(chw).unsqueeze(0)  # (1,C,H,W)
-        return t.to(self.device)
+        if x.shape == (C, H, W):
+            chw = x
+        elif x.shape == (H, W, C):
+            chw = np.transpose(x, (2, 0, 1))
+        else:
+            raise ValueError(
+                f"Obs shape mismatch for VQ-VAE: got {x.shape}, expected CHW {(C,H,W)} or HWC {(H,W,C)}"
+            )
+
+        chw = np.ascontiguousarray(chw, dtype=np.float32)
+        t = torch.from_numpy(chw).unsqueeze(0).to(self.device)
+        return t
 
     def stats(self) -> Dict[str, float]:
         calls = max(1, int(self.calls))
