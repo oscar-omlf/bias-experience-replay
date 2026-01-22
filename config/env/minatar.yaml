@@ -1,4 +1,10 @@
-id: "MinAtar/SpaceInvaders-v0"  # "MinAtar/Breakout-v0" | "MinAtar/Seaquest-v0" | "Breakout-v0" | ...
+id: "MinAtar/Breakout-v0"  # "MinAtar/Breakout-v0" | "MinAtar/Seaquest-v0" | "Breakout-v0" | ...
 max_episode_steps: 2500
 sticky_zeta: 0.05
 render_mode: null
+
+catastrophe:
+  enabled: true
+  p_cat_given_sticky: 0.1
+  shock: -100
+  apply_to_eval: false
