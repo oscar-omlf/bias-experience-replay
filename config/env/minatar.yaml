@@ -17,3 +17,10 @@ reward_noise:
   only_on_nonzero_reward: true
   clip_abs: 100.0
   apply_to_eval: false
+
+mp_tail:
+  enabled: true
+  p_bad: 0.02
+  M: 30.0
+  clip_abs: null
+  apply_to_eval: true

@@ -4,8 +4,8 @@ import gymnasium as gym
 from gymnasium.wrappers import TimeLimit, RecordEpisodeStatistics
 
 from minatar import gym as minatar_gym
-
 minatar_gym.register_envs()
+
 
 class StickyAction(gym.Wrapper):
     def __init__(self, env, zeta: float = 0.25, seed: int | None = None):
@@ -29,11 +29,7 @@ class StickyAction(gym.Wrapper):
 
         obs, rew, terminated, truncated, info = self.env.step(exec_a)
 
-        if info is None:
-            info = {}
-        else:
-            info = dict(info)
-
+        info = {} if info is None else dict(info)
         info["sticky"] = sticky
         info["orig_action"] = orig_a
         info["exec_action"] = exec_a
@@ -61,15 +57,11 @@ class StickyCatastrophe(gym.Wrapper):
 
     def step(self, action):
         obs, rew, terminated, truncated, info = self.env.step(action)
-
-        if info is None:
-            info = {}
-        else:
-            info = dict(info)
+        info = {} if info is None else dict(info)
 
         do_cat = bool(info.get("sticky", False)) and (self._rng.rand() < self.p_cat)
         if do_cat:
-            rew = float(rew) + float(self.shock)
+            rew = float(rew) + self.shock
             info["catastrophe"] = True
             info["catastrophe_shock"] = float(self.shock)
             self.cat_count += 1
@@ -77,99 +69,83 @@ class StickyCatastrophe(gym.Wrapper):
             info["catastrophe"] = False
             info["catastrophe_shock"] = 0.0
 
-        info["catastrophe_count"] = int(self.cat_count)
         return obs, float(rew), terminated, truncated, info
 
 
-class RewardHeavyTailNoise(gym.Wrapper):
+class MeanPreservingTailOnPositiveReward(gym.Wrapper):
     """
-    Add *zero-mean, heavy-tailed* noise to reward.
+    Mean-preserving heavy-tail noise applied ONLY when reward > 0 (informative transitions).
 
-    Default is a mixture-of-Gaussians:
-      noise ~ { N(0, sigma_base) w.p. (1 - p_tail),
-                N(0, sigma_tail) w.p. p_tail }
+    For base reward r>0:
+      with prob p_bad:  r' = r - M
+      else:            r' = r + c, where c = p_bad*M/(1-p_bad)
 
-    This is mean-0, but produces rare large shocks.
-
-    Options:
-      - only_on_nonzero_reward: if True, only add noise when env reward != 0.
-        (Often better for sparse-reward MinAtar so you don't drown learning in noise.)
-      - clip_abs: if set, clips the added noise to [-clip_abs, +clip_abs].
+    So E[r'] = r, but distribution has a fat left tail that PER will oversample.
     """
     def __init__(
         self,
         env: gym.Env,
-        p_tail: float = 1e-3,
-        sigma_base: float = 0.0,
-        sigma_tail: float = 20.0,
-        only_on_nonzero_reward: bool = True,
+        p_bad: float = 0.02,
+        M: float = 30.0,
         clip_abs: float | None = None,
+        apply_to_eval: bool = False,  # handled in make_minatar
         seed: int | None = None,
     ):
         super().__init__(env)
-        self.p_tail = float(p_tail)
-        self.sigma_base = float(sigma_base)
-        self.sigma_tail = float(sigma_tail)
-        self.only_on_nonzero_reward = bool(only_on_nonzero_reward)
+        self.p_bad = float(p_bad)
+        if not (0.0 < self.p_bad < 1.0):
+            raise ValueError(f"p_bad must be in (0,1); got {self.p_bad}")
+        self.M = float(M)
+        if self.M <= 0:
+            raise ValueError(f"M must be > 0; got {self.M}")
+
+        self.c = (self.p_bad * self.M) / (1.0 - self.p_bad)
         self.clip_abs = None if clip_abs is None else float(clip_abs)
         self._rng = np.random.RandomState(seed)
 
         # diagnostics
-        self.steps = 0
-        self.tail_events = 0
-        self.noise_sum = 0.0
-        self.noise_abs_sum = 0.0
+        self.n_applied = 0
+        self.n_bad = 0
 
     def reset(self, **kwargs):
-        self.steps = 0
-        self.tail_events = 0
-        self.noise_sum = 0.0
-        self.noise_abs_sum = 0.0
+        self.n_applied = 0
+        self.n_bad = 0
         return self.env.reset(**kwargs)
 
     def step(self, action):
         obs, rew, terminated, truncated, info = self.env.step(action)
-
-        if info is None:
-            info = {}
-        else:
-            info = dict(info)
-
-        self.steps += 1
+        info = {} if info is None else dict(info)
 
         r = float(rew)
-        apply = True
-        if self.only_on_nonzero_reward and (r == 0.0):
-            apply = False
-
-        noise = 0.0
-        tail = False
-        if apply:
+        # Apply only to informative rewards
+        if r > 0.0:
+            self.n_applied += 1
             u = self._rng.rand()
-            tail = (u < self.p_tail)
-            sigma = self.sigma_tail if tail else self.sigma_base
-            if sigma > 0.0:
-                noise = float(self._rng.normal(loc=0.0, scale=sigma))
-                if self.clip_abs is not None:
-                    noise = float(np.clip(noise, -self.clip_abs, self.clip_abs))
-            if tail:
-                self.tail_events += 1
+            if u < self.p_bad:
+                r2 = r - self.M
+                self.n_bad += 1
+                info["mp_tail_applied"] = True
+                info["mp_tail_bad"] = True
+                info["mp_tail_delta"] = float(-self.M)
+            else:
+                r2 = r + self.c
+                info["mp_tail_applied"] = True
+                info["mp_tail_bad"] = False
+                info["mp_tail_delta"] = float(self.c)
 
-            r = r + noise
-            self.noise_sum += noise
-            self.noise_abs_sum += abs(noise)
+            if self.clip_abs is not None:
+                r2 = float(np.clip(r2, -self.clip_abs, self.clip_abs))
+            rew = r2
+        else:
+            info["mp_tail_applied"] = False
+            info["mp_tail_bad"] = False
+            info["mp_tail_delta"] = 0.0
 
-        info["reward_noise/applied"] = bool(apply)
-        info["reward_noise/tail"] = bool(tail)
-        info["reward_noise/noise"] = float(noise)
-        info["reward_noise/tail_events"] = int(self.tail_events)
-        info["reward_noise/steps"] = int(self.steps)
-        # (optional running averages)
-        denom = float(max(1, self.steps))
-        info["reward_noise/mean_noise"] = float(self.noise_sum / denom)
-        info["reward_noise/mean_abs_noise"] = float(self.noise_abs_sum / denom)
+        # optional always-on counters
+        info["mp_tail_count_applied"] = int(self.n_applied)
+        info["mp_tail_count_bad"] = int(self.n_bad)
 
-        return obs, float(r), terminated, truncated, info
+        return obs, float(rew), terminated, truncated, info
 
 
 def _obs_adapter_minatar():
@@ -177,8 +153,8 @@ def _obs_adapter_minatar():
         arr = np.asarray(obs)
         if arr.ndim != 3:
             raise ValueError(f"MinAtar obs must be 3D HWC; got shape {arr.shape}")
-        arr = np.transpose(arr, (2, 0, 1)).astype(np.float32)  # HWC -> CHW
-        return arr
+        arr = np.transpose(arr, (2, 0, 1)).astype(np.float32)
+        return arr  # CHW
     return adapt
 
 
@@ -186,18 +162,18 @@ def make_minatar(cfg, seed: int):
     env = gym.make(cfg.id, render_mode=cfg.render_mode)
     eval_env = gym.make(cfg.id, render_mode=cfg.render_mode)
 
-    # Sticky actions
-    zeta = float(getattr(cfg, "sticky_zeta", 0.0))
+    # Sticky actions first (affects dynamics / state distribution)
+    zeta = float(cfg.sticky_zeta)
     if zeta > 0:
         env = StickyAction(env, zeta=zeta, seed=seed)
         eval_env = StickyAction(eval_env, zeta=zeta, seed=seed + 123)
 
-    # Catastrophe vs heavy-tail noise (exclusive by default)
+    # ---- Catastrophe OR mean-preserving tail (mutually exclusive by default) ----
     cat_cfg = getattr(cfg, "catastrophe", None)
-    noise_cfg = getattr(cfg, "reward_noise", None)
+    cat_enabled = bool(getattr(cat_cfg, "enabled", False)) if cat_cfg is not None else False
 
-    cat_enabled = (cat_cfg is not None) and bool(getattr(cat_cfg, "enabled", False))
-    noise_enabled = (noise_cfg is not None) and bool(getattr(noise_cfg, "enabled", False))
+    mp_cfg = getattr(cfg, "mp_tail", None)
+    mp_enabled = bool(getattr(mp_cfg, "enabled", False)) if mp_cfg is not None else False
 
     if cat_enabled:
         p_cat = float(getattr(cat_cfg, "p_cat_given_sticky", 5e-4))
@@ -208,35 +184,17 @@ def make_minatar(cfg, seed: int):
         if apply_to_eval:
             eval_env = StickyCatastrophe(eval_env, p_cat=p_cat, shock=shock, seed=seed + 1000)
 
-    elif noise_enabled:
-        p_tail = float(getattr(noise_cfg, "p_tail", 1e-3))
-        sigma_base = float(getattr(noise_cfg, "sigma_base", 0.0))
-        sigma_tail = float(getattr(noise_cfg, "sigma_tail", 20.0))
-        only_on_nonzero_reward = bool(getattr(noise_cfg, "only_on_nonzero_reward", True))
-        clip_abs = getattr(noise_cfg, "clip_abs", None)
-        apply_to_eval = bool(getattr(noise_cfg, "apply_to_eval", False))
+    elif mp_enabled:
+        p_bad = float(getattr(mp_cfg, "p_bad", 0.02))
+        M = float(getattr(mp_cfg, "M", 30.0))
+        clip_abs = getattr(mp_cfg, "clip_abs", None)
+        clip_abs = None if (clip_abs is None or str(clip_abs).lower() == "none") else float(clip_abs)
+        apply_to_eval = bool(getattr(mp_cfg, "apply_to_eval", False))
 
-        env = RewardHeavyTailNoise(
-            env,
-            p_tail=p_tail,
-            sigma_base=sigma_base,
-            sigma_tail=sigma_tail,
-            only_on_nonzero_reward=only_on_nonzero_reward,
-            clip_abs=clip_abs,
-            seed=seed + 2000,
-        )
+        env = MeanPreservingTailOnPositiveReward(env, p_bad=p_bad, M=M, clip_abs=clip_abs, seed=seed + 2001)
         if apply_to_eval:
-            eval_env = RewardHeavyTailNoise(
-                eval_env,
-                p_tail=p_tail,
-                sigma_base=sigma_base,
-                sigma_tail=sigma_tail,
-                only_on_nonzero_reward=only_on_nonzero_reward,
-                clip_abs=clip_abs,
-                seed=seed + 3000,
-            )
+            eval_env = MeanPreservingTailOnPositiveReward(eval_env, p_bad=p_bad, M=M, clip_abs=clip_abs, seed=seed + 2002)
 
-    # Standard wrappers
     env = RecordEpisodeStatistics(env)
     eval_env = RecordEpisodeStatistics(eval_env)
 
