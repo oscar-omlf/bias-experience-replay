@@ -1,35 +1,22 @@
-from collections import Counter
+from collections import defaultdict
+from typing import Dict, Tuple, Optional
+
 import numpy as np
 
 
 class TabularDynamicsModel:
     """
-    Empirical outcome model over full outcomes z = (s_next, r, terminated, truncated)
-    for each exact group (s, a).
+    Exact empirical joint model over outcome tuples z = (s_next, reward, terminated, truncated)
+    for each discrete (s, a).
 
-    This matches the paper's MODEL definition much better than storing only:
-      - counts over s'
-      - mean reward per s'
-      - marginal terminal probabilities per s'
+    This matches the intended MODEL semantics for the paper: when (s, a) is selected,
+    sample a full stored outcome from the empirical joint distribution induced by the buffer.
     """
 
-    def __init__(self, n_states: int, n_actions: int, reward_decimals: int | None = 8):
+    def __init__(self, n_states: int, n_actions: int):
         self.n_states = int(n_states)
         self.n_actions = int(n_actions)
-        self.reward_decimals = reward_decimals
-
-        # outcome_counts[s][a] is a Counter over tuples:
-        #   (s_next, reward, terminated, truncated) -> count
-        self.outcome_counts = [
-            [Counter() for _ in range(self.n_actions)]
-            for _ in range(self.n_states)
-        ]
-
-    def _canon_reward(self, r: float) -> float:
-        r = float(r)
-        if self.reward_decimals is not None:
-            r = round(r, int(self.reward_decimals))
-        return r
+        self.outcome_counts: Dict[Tuple[int, int], Dict[Tuple[int, float, bool, bool], int]] = defaultdict(lambda: defaultdict(int))
 
     def observe(
         self,
@@ -40,37 +27,27 @@ class TabularDynamicsModel:
         terminated: bool,
         truncated: bool,
     ):
-        s = int(s)
-        a = int(a)
-        s_next = int(s_next)
+        key = (int(s), int(a))
+        z = (int(s_next), float(r), bool(terminated), bool(truncated))
+        self.outcome_counts[key][z] += 1
 
-        outcome = (
-            s_next,
-            self._canon_reward(float(r)),
-            bool(terminated),
-            bool(truncated),
-        )
-        self.outcome_counts[s][a][outcome] += 1
-
-    def sample(self, s: int, a: int, default=None):
+    def sample(self, s: int, a: int, default: Optional[Tuple[int, float, bool, bool]] = None):
         """
-        Sample a synthetic outcome from the empirical frequency model P_hat(. | s, a).
+        Sample a full empirical outcome tuple for the queried (s, a).
 
-        If unseen, fall back to `default` if provided, else a neutral self-loop.
+        If (s, a) was never observed, return `default` if provided, otherwise a neutral fallback.
         """
-        s = int(s)
-        a = int(a)
+        key = (int(s), int(a))
+        counts_dict = self.outcome_counts.get(key, None)
 
-        ctr = self.outcome_counts[s][a]
-        if not ctr:
+        if not counts_dict:
             if default is not None:
                 return default
-            return s, 0.0, False, False
+            return int(s), 0.0, False, False
 
-        outcomes = list(ctr.keys())
-        freqs = np.asarray(list(ctr.values()), dtype=np.float64)
-        probs = freqs / freqs.sum()
-
-        k = int(np.random.choice(len(outcomes), p=probs))
-        s_next, r, terminated, truncated = outcomes[k]
+        outcomes = list(counts_dict.keys())
+        counts = np.asarray(list(counts_dict.values()), dtype=np.float64)
+        probs = counts / counts.sum()
+        idx = int(np.random.choice(len(outcomes), p=probs))
+        s_next, r, terminated, truncated = outcomes[idx]
         return int(s_next), float(r), bool(terminated), bool(truncated)

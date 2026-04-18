@@ -57,6 +57,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         beta_anneal_steps: int = 0,
         device: str = "cpu",
         keyer=None,
+        normalize_is_weights: bool = True,
     ):
         self.capacity = int(capacity)
         self.alpha = float(alpha)
@@ -66,6 +67,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.beta_anneal_steps = int(beta_anneal_steps) if beta_anneal_steps and beta_anneal_steps > 0 else None
 
         self.device = device
+        self.normalize_is_weights = bool(normalize_is_weights)
         self.tree = SumTree(self.capacity)
 
         self.max_priority = 1.0
@@ -189,14 +191,17 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             gid_used = len(set(gids))
             out["grouping/gid_used"] = float(gid_used)
 
-            # If VQVAEKeyer, we can compute usage frac
+            # If the keyer exposes a nominal or effective codebook size, log both.
             K = getattr(self.keyer, "codebook_size", None)
+            K_eff = getattr(self.keyer, "effective_codebook_size", K)
             if K is not None and int(K) > 0:
-                out["grouping/gid_usage_frac"] = float(gid_used) / float(int(K))
                 out["grouping/codebook_size"] = float(int(K))
+            if K_eff is not None and int(K_eff) > 0:
+                out["grouping/effective_codebook_size"] = float(int(K_eff))
+                out["grouping/gid_usage_frac"] = float(gid_used) / float(int(K_eff))
 
                 if n_actions is not None:
-                    possible = int(K) * int(n_actions)
+                    possible = int(K_eff) * int(n_actions)
                     out["grouping/ca_pairs_possible_in_sample"] = float(possible)
                     out["grouping/ca_pairs_coverage_frac"] = float(n_buckets) / float(possible + 1e-12)
 
@@ -334,9 +339,10 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         # Standard PER IS weights: (n * P(i))^{-beta}
         weights = (n * probs) ** (-self.beta)
-        wmax = float(weights.max()) if weights.size > 0 else 1.0
-        if wmax > 0:
-            weights /= wmax
+        if self.normalize_is_weights:
+            wmax = float(weights.max()) if weights.size > 0 else 1.0
+            if wmax > 0:
+                weights /= wmax
 
         # Anneal beta
         self.step += 1
@@ -453,7 +459,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         return groups
 
-    def compute_group_is_weights(self, indices: Sequence[int], beta: Optional[float] = None, normalize: bool = True):
+    def compute_group_is_weights(self, indices: Sequence[int], beta: Optional[float] = None, normalize: Optional[bool] = None):
         """
         Correct IS weights for SAMPLE/AVG/MODEL where effective sampling is:
           choose group g with prob s_g / S, then uniform within group.
@@ -474,6 +480,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         if beta is None:
             beta = float(self.beta)
+        if normalize is None:
+            normalize = bool(self.normalize_is_weights)
 
         w = np.ones((B,), dtype=np.float64)
         n_g = np.ones((B,), dtype=np.int64)

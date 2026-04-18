@@ -62,6 +62,7 @@ def make_replay(cfg, obs_space, device: str) -> ReplayBuffer:
             beta_anneal_steps=rcfg.beta_anneal_steps,
             device=device,
             keyer=keyer,
+            normalize_is_weights=bool(getattr(rcfg, "normalize_is_weights", True)),
         )
     else:
         raise ValueError(f"Unknown replay type: {typ}")

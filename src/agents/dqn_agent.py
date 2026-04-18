@@ -529,9 +529,13 @@ class DQNAgent:
                 # so compute group weights from used_indices (safe and clearer).
                 is_idx = used_indices if (method == "sample" and used_indices is not None) else batch["indices"]
 
+                normalize_group_is = bool(getattr(self.cfg.agents.replay, "normalize_is_weights", True))
                 gw_raw, n_g, s_g, S, n = self.replay.compute_group_is_weights(is_idx, normalize=False)
                 gw_raw = np.asarray(gw_raw, dtype=np.float32)
-                gw = gw_raw / (float(np.max(gw_raw)) + 1e-12)
+                if normalize_group_is:
+                    gw = gw_raw / (float(np.max(gw_raw)) + 1e-12)
+                else:
+                    gw = gw_raw
 
                 weights_raw = torch.as_tensor(gw_raw, dtype=torch.float32, device=self.device).view(-1)
                 weights = torch.as_tensor(gw, dtype=torch.float32, device=self.device).view(-1)
