@@ -74,6 +74,20 @@ class SimHashKeyer(GroupKeyer):
         return int(out)
 
 
+def _grid_key_from_codes(codes_2d: np.ndarray) -> int:
+    """
+    Deterministic 64-bit FNV-1a style hash over a small grid (e.g. 2x1, 1x2, 2x2).
+    Returns a Python int.
+    """
+    flat = (np.asarray(codes_2d, dtype=np.uint64).ravel() + np.uint64(1))
+    h = 1469598103934665603
+    prime = 1099511628211
+    mask = (1 << 64) - 1
+    for v in flat:
+        h = ((h ^ int(v)) * prime) & mask
+    return int(np.uint64(h))
+
+
 class VQVAEKeyer(GroupKeyer):
     """
     Uses a pretrained VQ-VAE encoder to map obs -> code index in {0..K-1}.
@@ -107,6 +121,7 @@ class VQVAEKeyer(GroupKeyer):
         self.obs_shape = tuple(ckpt["obs_shape"])  # (C,H,W)
         self.in_channels = int(cfg["in_channels"])
         self.codebook_size = int(cfg["codebook_size"])
+        self.grid_size = tuple(int(x) for x in cfg.get("grid_size", [1, 1]))
 
         self.model = VQVAE(
             in_channels=self.in_channels,
@@ -115,6 +130,7 @@ class VQVAEKeyer(GroupKeyer):
             embed_dim=int(cfg["embed_dim"]),
             hidden_channels=int(cfg["hidden_channels"]),
             beta=float(cfg["beta"]),
+            grid_size=self.grid_size,
         ).to(self.device)
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval()
@@ -168,13 +184,20 @@ class VQVAEKeyer(GroupKeyer):
         t0 = time.time()
         with torch.no_grad():
             x = self._obs_to_bchw(obs)
-            idx = self.model.encode_indices(x)  # (1,)
-            code = int(idx.item())
+            idx = self.model.encode_indices(x).detach().cpu().numpy()
+
+            if idx.ndim == 1:
+                code = int(idx[0])                 # 1x1
+            elif idx.ndim == 3:
+                code = _grid_key_from_codes(idx[0])  # 2x1 / 1x2 / 2x2
+            else:
+                raise ValueError(f"Unexpected VQ-VAE code shape: {idx.shape}")
+
         self.encode_time_ms += 1000.0 * (time.time() - t0)
 
         if self.cache_size > 0:
             if len(self._cache) >= self.cache_size:
                 self._cache.clear()
-            self._cache[key] = code
+            self._cache[key] = int(code)
 
-        return code
+        return int(code)

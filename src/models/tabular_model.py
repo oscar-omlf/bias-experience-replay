@@ -1,26 +1,35 @@
+from collections import Counter
 import numpy as np
 
 
 class TabularDynamicsModel:
     """
-    Simple tabular model p(s', r, done, trunc | s, a) learned from experience.
+    Empirical outcome model over full outcomes z = (s_next, r, terminated, truncated)
+    for each exact group (s, a).
 
-    - Assumes discrete states and actions (e.g. FrozenLake).
-    - For each (s, a, s'):
-        * counts[s, a, s'] how many times we saw that transition
-        * reward_sum[s, a, s'] sum of rewards
-        * term_counts[s, a, s'] how many times it was terminal
-        * trunc_counts[s, a, s'] how many times it was truncated
+    This matches the paper's MODEL definition much better than storing only:
+      - counts over s'
+      - mean reward per s'
+      - marginal terminal probabilities per s'
     """
 
-    def __init__(self, n_states: int, n_actions: int):
-        self.n_states = n_states
-        self.n_actions = n_actions
+    def __init__(self, n_states: int, n_actions: int, reward_decimals: int | None = 8):
+        self.n_states = int(n_states)
+        self.n_actions = int(n_actions)
+        self.reward_decimals = reward_decimals
 
-        self.counts = np.zeros((n_states, n_actions, n_states), dtype=np.int64)
-        self.reward_sum = np.zeros((n_states, n_actions, n_states), dtype=np.float32)
-        self.term_counts = np.zeros((n_states, n_actions, n_states), dtype=np.int64)
-        self.trunc_counts = np.zeros((n_states, n_actions, n_states), dtype=np.int64)
+        # outcome_counts[s][a] is a Counter over tuples:
+        #   (s_next, reward, terminated, truncated) -> count
+        self.outcome_counts = [
+            [Counter() for _ in range(self.n_actions)]
+            for _ in range(self.n_states)
+        ]
+
+    def _canon_reward(self, r: float) -> float:
+        r = float(r)
+        if self.reward_decimals is not None:
+            r = round(r, int(self.reward_decimals))
+        return r
 
     def observe(
         self,
@@ -31,35 +40,37 @@ class TabularDynamicsModel:
         terminated: bool,
         truncated: bool,
     ):
-        self.counts[s, a, s_next] += 1
-        self.reward_sum[s, a, s_next] += float(r)
-        self.term_counts[s, a, s_next] += int(bool(terminated))
-        self.trunc_counts[s, a, s_next] += int(bool(truncated))
+        s = int(s)
+        a = int(a)
+        s_next = int(s_next)
+
+        outcome = (
+            s_next,
+            self._canon_reward(float(r)),
+            bool(terminated),
+            bool(truncated),
+        )
+        self.outcome_counts[s][a][outcome] += 1
 
     def sample(self, s: int, a: int, default=None):
         """
-        Sample a new (s_next, r, terminated, truncated) for (s, a).
+        Sample a synthetic outcome from the empirical frequency model P_hat(. | s, a).
 
-        If we have never seen (s, a), fall back to default if given,
-        otherwise stay in place with zero reward and no termination.
+        If unseen, fall back to `default` if provided, else a neutral self-loop.
         """
-        counts_sa = self.counts[s, a]
-        total = counts_sa.sum()
-        if total == 0:
+        s = int(s)
+        a = int(a)
+
+        ctr = self.outcome_counts[s][a]
+        if not ctr:
             if default is not None:
                 return default
-            # Neutral fallback: stay in place, zero reward, not done
             return s, 0.0, False, False
 
-        probs = counts_sa.astype(np.float32) / float(total)
-        s_next = int(np.random.choice(self.n_states, p=probs))
+        outcomes = list(ctr.keys())
+        freqs = np.asarray(list(ctr.values()), dtype=np.float64)
+        probs = freqs / freqs.sum()
 
-        c = max(int(counts_sa[s_next]), 1)
-        r_mean = float(self.reward_sum[s, a, s_next] / c)
-        term_prob = float(self.term_counts[s, a, s_next] / c)
-        trunc_prob = float(self.trunc_counts[s, a, s_next] / c)
-
-        term = np.random.rand() < term_prob
-        trunc = np.random.rand() < trunc_prob
-
-        return s_next, r_mean, term, trunc
+        k = int(np.random.choice(len(outcomes), p=probs))
+        s_next, r, terminated, truncated = outcomes[k]
+        return int(s_next), float(r), bool(terminated), bool(truncated)

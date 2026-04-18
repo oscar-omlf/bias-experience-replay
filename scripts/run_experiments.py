@@ -24,9 +24,13 @@ AGENT_VARIANTS = {
         "group": "PER_NOMIT",
         "overrides": [
             "agents=per",
+            "agents.replay.grouping.enabled=false",
             "agents.replay.sa_mitigation.enabled=false",
             "agents.replay.sa_mitigation.method=none",
+            "agents.replay.sa_mitigation.include_self=true",
+            "agents.replay.sa_mitigation.min_group=1",
             "agents.replay.sa_mitigation.max_group=0",
+            "agents.replay.sa_mitigation.update_all_siblings=false",
         ],
     },
     "per_sib_sample": {
@@ -34,10 +38,13 @@ AGENT_VARIANTS = {
         "group": "PER_SAMPLE",
         "overrides": [
             "agents=per",
+            "agents.replay.grouping.enabled=false",
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=sample",
-            "agents.replay.sa_mitigation.update_all_siblings=false",
+            "agents.replay.sa_mitigation.include_self=true",
+            "agents.replay.sa_mitigation.min_group=1",
             "agents.replay.sa_mitigation.max_group=0",
+            "agents.replay.sa_mitigation.update_all_siblings=false",
         ],
     },
     "per_sib_avg": {
@@ -45,8 +52,12 @@ AGENT_VARIANTS = {
         "group": "PER_AVG",
         "overrides": [
             "agents=per",
+            "agents.replay.grouping.enabled=false",
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=avg",
+            "agents.replay.sa_mitigation.include_self=true",
+            "agents.replay.sa_mitigation.min_group=1",
+            # "agents.replay.sa_mitigation.max_group=0",
             "agents.replay.sa_mitigation.update_all_siblings=true",
         ],
     },
@@ -55,14 +66,16 @@ AGENT_VARIANTS = {
         "group": "PER_MODEL",
         "overrides": [
             "agents=per",
+            "agents.replay.grouping.enabled=false",
             "agents.replay.sa_mitigation.enabled=true",
             "agents.replay.sa_mitigation.method=model",
-            "agents.replay.sa_mitigation.update_all_siblings=false",
+            "agents.replay.sa_mitigation.include_self=true",
+            "agents.replay.sa_mitigation.min_group=1",
             "agents.replay.sa_mitigation.max_group=0",
+            "agents.replay.sa_mitigation.update_all_siblings=false",
         ],
     },
 }
-
 
 
 def ensure_dir(path: str):

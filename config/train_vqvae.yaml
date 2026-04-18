@@ -7,7 +7,7 @@ seed: 1
 device: auto
 
 wandb:
-  project: ber-final
+  project: ber-final-vqvae-train
   entity: bias-experience-replay
   mode: online
   group: vqvae_minatar_breakout
@@ -23,7 +23,8 @@ train:
   eval_only: false
 
 vqvae:
-  codebook_size: 512
+  grid_size: 1
+  codebook_size: 256
   embed_dim: 32
   hidden_channels: 64
   beta: 0.25

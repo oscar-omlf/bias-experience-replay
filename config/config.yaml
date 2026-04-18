@@ -7,7 +7,7 @@ seed: 1
 device: auto
 
 wandb:
-  project: ber-final
+  project: ber-final-run-march
   entity: bias-experience-replay
   mode: online
   group: null

@@ -49,6 +49,55 @@ class VQVAETrainCfg:
     dump_examples_path: Optional[str] = "artifacts/vqvae_group_examples.txt"
 
 
+def _parse_grid_size(v) -> Tuple[int, int]:
+    """
+    Accepts:
+      - int (g) -> (g,g)
+      - list/tuple/ListConfig [g,g] -> (g,g)
+      - None -> (1,1)
+    """
+    if v is None:
+        return (1, 1)
+
+    if OmegaConf.is_list(v):
+        if len(v) != 2:
+            raise ValueError(f"vqvae.grid_size list-like value must have length 2, got {v}")
+        return (int(v[0]), int(v[1]))
+
+    if isinstance(v, (list, tuple)):
+        if len(v) != 2:
+            raise ValueError(f"vqvae.grid_size list/tuple must have length 2, got {v}")
+        return (int(v[0]), int(v[1]))
+
+    return (int(v), int(v))
+
+
+# def _grid_key_from_codes(codes_2d: np.ndarray) -> int:
+#     """
+#     Deterministic 64-bit FNV-1a style hash over a small grid (e.g., 2x2 or 3x3).
+#     Returns a Python int (fits in uint64 range).
+#     """
+#     flat = (np.asarray(codes_2d, dtype=np.uint64).ravel() + np.uint64(1))
+#     h = np.uint64(1469598103934665603)
+#     prime = np.uint64(1099511628211)
+#     for v in flat:
+#         h = (h ^ v) * prime
+#     return int(h)
+
+def _grid_key_from_codes(codes_2d: np.ndarray) -> np.uint64:
+    """
+    Deterministic 64-bit FNV-1a style hash over a small grid (e.g., 2x2 or 3x3).
+    Returns np.uint64 (0..2^64-1).
+    """
+    flat = (np.asarray(codes_2d, dtype=np.uint64).ravel() + np.uint64(1))
+    h = 1469598103934665603
+    prime = 1099511628211
+    mask = (1 << 64) - 1
+    for v in flat:
+        h = ((h ^ int(v)) * prime) & mask
+    return np.uint64(h)
+
+
 def _to_tensor_batch(obs_batch: np.ndarray, device: str) -> torch.Tensor:
     x = np.asarray(obs_batch, dtype=np.float32)
     if x.ndim != 4:
@@ -103,7 +152,10 @@ def _compute_code_metrics(
 ) -> Dict[str, float]:
     """
     Computes codebook usage, perplexity, and intra-code variance.
-    Assumes obs_arr is (N,C,H,W).
+
+    Works for:
+      - single-code mode: idx shape (m,)
+      - grid-code mode:   idx shape (m,Gh,Gw)
     """
     xall = np.asarray(obs_arr, dtype=np.float32)
     if xall.ndim != 4:
@@ -115,10 +167,27 @@ def _compute_code_metrics(
     sample = xall[idx]  # (m,C,H,W)
 
     with torch.no_grad():
-        codes = model.encode_indices(_to_tensor_batch(sample, device=device)).detach().cpu().numpy().astype(np.int64)
+        codes_t = model.encode_indices(_to_tensor_batch(sample, device=device))
+        codes = codes_t.detach().cpu().numpy().astype(np.int64)
 
     K = int(codebook_size)
-    counts = np.bincount(codes, minlength=K).astype(np.int64)
+
+    if codes.ndim == 1:
+        # (m,)
+        codes_flat = codes
+        Gh = Gw = 1
+        any_code_mask = lambda k: (codes == k)
+        uniq_per_frame = np.ones((m,), dtype=np.int64)
+    elif codes.ndim == 3:
+        # (m,Gh,Gw)
+        Gh, Gw = int(codes.shape[1]), int(codes.shape[2])
+        codes_flat = codes.reshape(-1)
+        any_code_mask = lambda k: np.any(codes == k, axis=(1, 2))
+        uniq_per_frame = np.asarray([len(np.unique(codes[i].ravel())) for i in range(m)], dtype=np.int64)
+    else:
+        raise ValueError(f"encode_indices returned unexpected shape {codes.shape}")
+
+    counts = np.bincount(codes_flat, minlength=K).astype(np.int64)
 
     used = int(np.sum(counts > 0))
     usage_frac = float(used) / float(K)
@@ -126,15 +195,20 @@ def _compute_code_metrics(
     H = _entropy_from_counts(counts)
     perplexity = float(np.exp(H))
 
-    # intra-code variance proxy (binary-ish):
-    # var proxy = mean_{pixels}(mu*(1-mu)) for each code
+    # intra-code variance proxy on frames that contain code k (any patch)
     intra_vars = []
+    max_frames_per_code = 256
     for k in range(K):
         ck = int(counts[k])
         if ck <= 0:
             continue
-        mask = (codes == k)
-        xb = sample[mask]               # (ck,C,H,W)
+        mask = any_code_mask(k)
+        xb = sample[mask]
+        if xb.shape[0] <= 0:
+            continue
+        if xb.shape[0] > max_frames_per_code:
+            pick = np.random.choice(xb.shape[0], size=max_frames_per_code, replace=False)
+            xb = xb[pick]
         mu_k = xb.mean(axis=0)          # (C,H,W)
         var_k = float(np.mean(mu_k * (1.0 - mu_k)))
         intra_vars.append(var_k)
@@ -142,14 +216,19 @@ def _compute_code_metrics(
     intra_mean = float(np.mean(intra_vars)) if intra_vars else 0.0
     intra_p90 = float(np.quantile(np.asarray(intra_vars), 0.90)) if len(intra_vars) >= 5 else intra_mean
 
-    return {
+    out = {
+        "vqvae/latent_grid_h": float(Gh),
+        "vqvae/latent_grid_w": float(Gw),
         "vqvae/code_usage_frac": usage_frac,
         "vqvae/code_used": float(used),
         "vqvae/code_entropy": float(H),
         "vqvae/perplexity": float(perplexity),
         "vqvae/intra_code_var_mean": float(intra_mean),
         "vqvae/intra_code_var_p90": float(intra_p90),
+        "vqvae/unique_codes_per_frame_mean": float(np.mean(uniq_per_frame)) if uniq_per_frame.size > 0 else 0.0,
+        "vqvae/unique_codes_per_frame_p90": float(np.quantile(uniq_per_frame, 0.90)) if uniq_per_frame.size >= 5 else float(np.mean(uniq_per_frame)) if uniq_per_frame.size > 0 else 0.0,
     }
+    return out
 
 
 def _compute_sa_stats(
@@ -162,16 +241,12 @@ def _compute_sa_stats(
     bucket_thresholds: List[int],
 ) -> Dict[str, float]:
     """
-    Computes (code,action)-level diagnostics for latent grouping quality.
+    Computes (state_key, action)-level diagnostics for latent grouping quality.
 
-    Returns metrics including:
-      - counts distribution over observed (code,action) buckets
-      - fraction of transitions that fall into buckets with count >= threshold
-      - reward std within (code,action)
-      - done rate within (code,action)
-      - entropy of next_code within (code,action)
+    - single-code mode: state_key is the code id (int)
+    - grid-code mode:   state_key is a 64-bit hash of the (Gh,Gw) code grid
 
-    Assumes obs and next_obs are (N,C,H,W).
+    Also computes entropy of next_state_key distribution within each (state_key, action).
     """
     obs = np.asarray(transitions["obs"], dtype=np.float32)
     act = np.asarray(transitions["act"], dtype=np.int64)
@@ -193,27 +268,53 @@ def _compute_sa_stats(
     next_s = next_obs[idx]
 
     with torch.no_grad():
-        c = model.encode_indices(_to_tensor_batch(obs_s, device=device)).cpu().numpy().astype(np.int64)
-        c2 = model.encode_indices(_to_tensor_batch(next_s, device=device)).cpu().numpy().astype(np.int64)
+        c_t = model.encode_indices(_to_tensor_batch(obs_s, device=device))
+        c2_t = model.encode_indices(_to_tensor_batch(next_s, device=device))
 
-    K = int(codebook_size)
+    c = c_t.detach().cpu().numpy().astype(np.int64)
+    c2 = c2_t.detach().cpu().numpy().astype(np.int64)
 
-    # Aggregate per (c,a)
+    # Build state keys
+    if c.ndim == 1:
+        keys = c.astype(np.int64)
+        keys2 = c2.astype(np.int64)
+
+        def next_entropy(counter_dict: Dict[int, int]) -> float:
+            counts = np.asarray(list(counter_dict.values()), dtype=np.int64)
+            return _entropy_from_counts(counts)
+
+    # elif c.ndim == 3:
+    #     keys  = np.asarray([_grid_key_from_codes(c[i])  for i in range(c.shape[0])], dtype=np.uint64)
+    #     keys2 = np.asarray([_grid_key_from_codes(c2[i]) for i in range(c2.shape[0])], dtype=np.uint64)
+
+    elif c.ndim == 3:
+        keys = np.fromiter((_grid_key_from_codes(c[i]) for i in range(c.shape[0])),
+                       dtype=np.uint64, count=c.shape[0])
+        keys2 = np.fromiter((_grid_key_from_codes(c2[i]) for i in range(c2.shape[0])),
+                        dtype=np.uint64, count=c2.shape[0])
+
+        def next_entropy(counter_dict: Dict[int, int]) -> float:
+            counts = np.asarray(list(counter_dict.values()), dtype=np.int64)
+            return _entropy_from_counts(counts)
+
+    else:
+        raise ValueError(f"encode_indices returned unexpected shape {c.shape}")
+
+    # Aggregate per (key, action)
     counts = defaultdict(int)
     rew_sum = defaultdict(float)
     rew_sumsq = defaultdict(float)
     done_sum = defaultdict(float)
-    next_counts = defaultdict(lambda: np.zeros((K,), dtype=np.int64))
+    next_counts = defaultdict(lambda: defaultdict(int))  # per (key,a): next_key -> count
 
-    for ci, ai, ri, di, c2i in zip(c, act_s, rew_s, done_s, c2):
-        key = (int(ci), int(ai))
+    for ki, ai, ri, di, k2i in zip(keys, act_s, rew_s, done_s, keys2):
+        key = (int(ki), int(ai))
         counts[key] += 1
         rew_sum[key] += float(ri)
         rew_sumsq[key] += float(ri * ri)
         done_sum[key] += float(di)
-        next_counts[key][int(c2i)] += 1
+        next_counts[key][int(k2i)] += 1
 
-    # Bucket size distribution over *all observed* (c,a)
     bucket_sizes = np.asarray(list(counts.values()), dtype=np.int64)
     if bucket_sizes.size == 0:
         bucket_sizes = np.asarray([0], dtype=np.int64)
@@ -227,9 +328,8 @@ def _compute_sa_stats(
     bs_max = float(np.max(bucket_sizes))
     bs_mean = float(np.mean(bucket_sizes))
 
-    # Fraction of transitions that are in “usable” buckets (based on bucket count)
     per_transition_bucket_size = np.asarray(
-        [counts[(int(ci), int(ai))] for ci, ai in zip(c, act_s)],
+        [counts[(int(ki), int(ai))] for ki, ai in zip(keys, act_s)],
         dtype=np.int64,
     )
 
@@ -238,7 +338,7 @@ def _compute_sa_stats(
         thr_i = int(thr)
         frac_ge[thr_i] = float(np.mean(per_transition_bucket_size >= thr_i))
 
-    # Summarize per (c,a) keys with enough support (>= min_count_for_sa)
+    # summarize keys with enough support
     ent_list = []
     rstd_list = []
     done_list = []
@@ -250,7 +350,8 @@ def _compute_sa_stats(
         var = max(0.0, (rew_sumsq[key] / float(cnt)) - mu * mu)
         rstd = float(np.sqrt(var))
         dr = done_sum[key] / float(cnt)
-        ent = _entropy_from_counts(next_counts[key])
+        ent = next_entropy(next_counts[key])
+
         ent_list.append(ent)
         rstd_list.append(rstd)
         done_list.append(dr)
@@ -289,15 +390,18 @@ def _compute_sa_stats(
         "grouping/ca_bucket_count_p90": bs_p90,
         "grouping/ca_bucket_count_min": bs_min,
         "grouping/ca_bucket_count_max": bs_max,
+
+        "grouping/ca_pairs_observed": float(len(counts)),
     }
 
     for thr_i, v in frac_ge.items():
         out[f"grouping/trans_frac_in_ca_bucket_ge_{thr_i}"] = float(v)
 
-    A_obs = int(np.max(act_s) + 1) if act_s.size > 0 else 0
-    out["grouping/ca_pairs_observed"] = float(len(counts))
-    out["grouping/ca_pairs_possible_in_sample"] = float(K * A_obs) if A_obs > 0 else 0.0
-    out["grouping/ca_pairs_coverage_frac"] = float(len(counts) / float(K * A_obs)) if A_obs > 0 else 0.0
+    # Only keep the old “possible pairs” coverage metric in single-code mode (where K is meaningful)
+    if c.ndim == 1:
+        A_obs = int(np.max(act_s) + 1) if act_s.size > 0 else 0
+        out["grouping/ca_pairs_possible_in_sample"] = float(codebook_size * A_obs) if A_obs > 0 else 0.0
+        out["grouping/ca_pairs_coverage_frac"] = float(len(counts) / float(codebook_size * A_obs)) if A_obs > 0 else 0.0
 
     return out
 
@@ -313,12 +417,10 @@ def _dump_top_codes(
     path: str,
 ):
     """
-    Dumps human-readable examples for top-k codes:
-      - count
-      - ASCII mean map
-      - a few individual example frames
+    Dumps human-readable examples for top-k codes.
+    Works for both single-code and grid-code mode.
 
-    Assumes obs_arr is (N,C,H,W).
+    In grid mode, a frame is considered an example of code k if ANY patch uses code k.
     """
     xall = np.asarray(obs_arr, dtype=np.float32)
     if xall.ndim != 4:
@@ -350,11 +452,21 @@ def _dump_top_codes(
     sample = xall[idx]
 
     with torch.no_grad():
-        codes = model.encode_indices(_to_tensor_batch(sample, device=device)).cpu().numpy().astype(np.int64)
+        codes_t = model.encode_indices(_to_tensor_batch(sample, device=device))
+        codes = codes_t.detach().cpu().numpy().astype(np.int64)
 
     K = int(codebook_size)
-    counts = np.bincount(codes, minlength=K)
 
+    if codes.ndim == 1:
+        codes_flat = codes
+        frame_has_code = lambda k: (codes == k)
+    elif codes.ndim == 3:
+        codes_flat = codes.reshape(-1)
+        frame_has_code = lambda k: np.any(codes == k, axis=(1, 2))
+    else:
+        raise ValueError(f"encode_indices returned unexpected shape {codes.shape}")
+
+    counts = np.bincount(codes_flat, minlength=K)
     topk = int(topk_print)
     top_codes = np.argsort(-counts)[:topk]
 
@@ -368,11 +480,11 @@ def _dump_top_codes(
             lines.append("<empty>\n")
             continue
 
-        mask = (codes == k)
-        xb = sample[mask]  # (ck,C,H,W)
+        mask = frame_has_code(int(k))
+        xb = sample[mask]  # frames containing code k (any patch in grid mode)
 
         lines.append("[mean map]")
-        lines.append(_ascii_mean_map(xb))
+        lines.append(_ascii_mean_map(xb) if xb.shape[0] > 0 else "<no frames>")
         lines.append("")
 
         ex = min(int(examples_per_code), xb.shape[0])
@@ -425,7 +537,6 @@ def main(cfg: DictConfig):
     collect_steps = int(cfg.train.collect_steps)
     compute_sa = bool(cfg.diagnostics.compute_sa_stats)
 
-    # Global-step anchors (FIX: avoids NameError and keeps logs consistent)
     global_step_start = collect_steps  # training begins after data collection
 
     obs_list: List[np.ndarray] = []
@@ -471,6 +582,8 @@ def main(cfg: DictConfig):
     hidden_channels = int(cfg.vqvae.hidden_channels)
     beta = float(cfg.vqvae.beta)
 
+    grid_size = _parse_grid_size(OmegaConf.select(cfg, "vqvae.grid_size", default=1))
+
     obs_shape = tuple(obs_arr.shape[1:])  # (C,H,W)
     in_channels = int(obs_arr.shape[1])
 
@@ -483,6 +596,8 @@ def main(cfg: DictConfig):
 
         ckpt, vcfg = _load_vqvae_ckpt(str(load_path), device=device)
 
+        grid_size = _parse_grid_size(vcfg.get("grid_size", 1))
+
         model = VQVAE(
             in_channels=int(vcfg["in_channels"]),
             obs_shape=tuple(vcfg["obs_shape"]),
@@ -490,14 +605,15 @@ def main(cfg: DictConfig):
             embed_dim=int(vcfg["embed_dim"]),
             hidden_channels=int(vcfg["hidden_channels"]),
             beta=float(vcfg["beta"]),
+            grid_size=grid_size,
         ).to(device)
         model.load_state_dict(ckpt["state_dict"])
         model.eval()
 
         codebook_size = int(vcfg["codebook_size"])
         train_steps = 0
-        global_step_end = int(collect_steps + train_steps)  # FIX: define early for downstream use
-        print(f"[vqvae] eval-only: loaded {load_path} (K={codebook_size})")
+        global_step_end = int(collect_steps + train_steps)
+        print(f"[vqvae] eval-only: loaded {load_path} (K={codebook_size}, grid={grid_size})")
 
     else:
         model = VQVAE(
@@ -507,6 +623,7 @@ def main(cfg: DictConfig):
             embed_dim=embed_dim,
             hidden_channels=hidden_channels,
             beta=beta,
+            grid_size=grid_size,
         ).to(device)
 
         opt = optim.Adam(model.parameters(), lr=float(cfg.train.lr))
@@ -518,8 +635,8 @@ def main(cfg: DictConfig):
         recon_loss = str(cfg.train.recon_loss).lower()
 
         for step in range(train_steps):
-            idx = np.random.randint(0, n, size=bs)
-            batch = obs_arr[idx]
+            idxb = np.random.randint(0, n, size=bs)
+            batch = obs_arr[idxb]
             x = _to_tensor_batch(batch, device=device)
 
             out = model(x)
@@ -542,22 +659,25 @@ def main(cfg: DictConfig):
             opt.step()
 
             if (step % log_every) == 0:
-                gstep = global_step_start + step  # FIX: now defined
+                gstep = global_step_start + step
                 metrics = {
                     "vqvae/train_loss": float(loss.item()),
                     "vqvae/recon_loss": float(recon.item()),
                     "vqvae/vq_loss": float(vq_loss.item()),
                     "vqvae/train_step": float(step),
+                    "vqvae/grid_h": float(grid_size[0]),
+                    "vqvae/grid_w": float(grid_size[1]),
                 }
                 log_metrics(metrics, step=int(gstep))
                 print(
                     f"[vqvae] step={step} gstep={gstep} "
                     f"loss={metrics['vqvae/train_loss']:.6f} "
                     f"recon={metrics['vqvae/recon_loss']:.6f} "
-                    f"vq={metrics['vqvae/vq_loss']:.6f}"
+                    f"vq={metrics['vqvae/vq_loss']:.6f} "
+                    f"grid={grid_size}"
                 )
 
-        global_step_end = int(collect_steps + train_steps)  # FIX: defined before saving/diagnostics
+        global_step_end = int(collect_steps + train_steps)
 
     # -------------------------
     # Save checkpoint
@@ -565,7 +685,7 @@ def main(cfg: DictConfig):
     if not eval_only:
         save_path = str(cfg.outputs.save_path)
         save_dir = os.path.dirname(save_path)
-        if save_dir:  # FIX: avoids os.makedirs("") crash when save_path has no directory
+        if save_dir:
             os.makedirs(save_dir, exist_ok=True)
 
         ckpt = {
@@ -578,15 +698,16 @@ def main(cfg: DictConfig):
                 "embed_dim": embed_dim,
                 "hidden_channels": hidden_channels,
                 "beta": beta,
+                "grid_size": list(grid_size),
             },
             "env_cfg": OmegaConf.to_container(cfg.env, resolve=True),
-            "global_step_end": int(global_step_end),  # FIX: now always defined
+            "global_step_end": int(global_step_end),
         }
         torch.save(ckpt, save_path)
         print(f"[vqvae] saved -> {save_path}")
 
     # -------------------------
-    # Diagnostics (log + print)
+    # Diagnostics
     # -------------------------
     model.eval()
 
