@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+import hashlib
 import time
 
 import numpy as np
@@ -31,8 +32,9 @@ class DiscreteIdentityKeyer(GroupKeyer):
         arr = np.asarray(obs)
         if arr.ndim == 0:
             return int(arr.reshape(()))
-        # Fallback: stable hash of bytes
-        return int(np.uint64(hash(arr.tobytes())))
+        # Fallback: deterministic 64-bit hash of bytes (stable across runs).
+        h = hashlib.blake2b(arr.tobytes(), digest_size=8).digest()
+        return int.from_bytes(h, byteorder="little", signed=False)
 
 
 @dataclass
@@ -74,18 +76,27 @@ class SimHashKeyer(GroupKeyer):
         return int(out)
 
 
-def _grid_key_from_codes(codes_2d: np.ndarray) -> int:
+def _pack_grid_codes(codes_2d: np.ndarray, codebook_size: int) -> int:
     """
-    Deterministic 64-bit FNV-1a style hash over a small grid (e.g. 2x1, 1x2, 2x2).
-    Returns a Python int.
+    Exact row-major base-K packing of a small code grid into a single Python int.
+
+    This is collision-free as long as each entry is in {0, ..., K-1}.
+    For example, a 2x1 grid with K=8 has an effective codebook size of 8^2 = 64.
     """
-    flat = (np.asarray(codes_2d, dtype=np.uint64).ravel() + np.uint64(1))
-    h = 1469598103934665603
-    prime = 1099511628211
-    mask = (1 << 64) - 1
-    for v in flat:
-        h = ((h ^ int(v)) * prime) & mask
-    return int(np.uint64(h))
+    K = int(codebook_size)
+    if K <= 1:
+        raise ValueError(f"codebook_size must be >= 2 for packing; got {K}")
+
+    flat = np.asarray(codes_2d, dtype=np.int64).ravel()
+    out = 0
+    base = 1
+    for v in flat.tolist():
+        vv = int(v)
+        if vv < 0 or vv >= K:
+            raise ValueError(f"grid code {vv} outside [0, {K})")
+        out += vv * base
+        base *= K
+    return int(out)
 
 
 class VQVAEKeyer(GroupKeyer):
@@ -122,6 +133,10 @@ class VQVAEKeyer(GroupKeyer):
         self.in_channels = int(cfg["in_channels"])
         self.codebook_size = int(cfg["codebook_size"])
         self.grid_size = tuple(int(x) for x in cfg.get("grid_size", [1, 1]))
+        self.n_tokens_h = int(self.grid_size[0])
+        self.n_tokens_w = int(self.grid_size[1])
+        self.n_tokens = int(self.n_tokens_h * self.n_tokens_w)
+        self.effective_codebook_size = int(self.codebook_size ** self.n_tokens)
 
         self.model = VQVAE(
             in_channels=self.in_channels,
@@ -162,6 +177,10 @@ class VQVAEKeyer(GroupKeyer):
         avg_ms = float(self.encode_time_ms) / float(max(1, int(self.cache_misses)))
         return {
             "vqvae_codebook_size": float(self.codebook_size),
+            "vqvae_effective_codebook_size": float(self.effective_codebook_size),
+            "vqvae_grid_h": float(self.n_tokens_h),
+            "vqvae_grid_w": float(self.n_tokens_w),
+            "vqvae_n_tokens": float(self.n_tokens),
             "cache_size": float(len(self._cache)),
             "cache_hits": float(self.cache_hits),
             "cache_misses": float(self.cache_misses),
@@ -189,7 +208,7 @@ class VQVAEKeyer(GroupKeyer):
             if idx.ndim == 1:
                 code = int(idx[0])                 # 1x1
             elif idx.ndim == 3:
-                code = _grid_key_from_codes(idx[0])  # 2x1 / 1x2 / 2x2
+                code = _pack_grid_codes(idx[0], self.codebook_size)  # exact composite code
             else:
                 raise ValueError(f"Unexpected VQ-VAE code shape: {idx.shape}")
 

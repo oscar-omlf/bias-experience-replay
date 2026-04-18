@@ -72,30 +72,51 @@ def _parse_grid_size(v) -> Tuple[int, int]:
     return (int(v), int(v))
 
 
-# def _grid_key_from_codes(codes_2d: np.ndarray) -> int:
-#     """
-#     Deterministic 64-bit FNV-1a style hash over a small grid (e.g., 2x2 or 3x3).
-#     Returns a Python int (fits in uint64 range).
-#     """
-#     flat = (np.asarray(codes_2d, dtype=np.uint64).ravel() + np.uint64(1))
-#     h = np.uint64(1469598103934665603)
-#     prime = np.uint64(1099511628211)
-#     for v in flat:
-#         h = (h ^ v) * prime
-#     return int(h)
+def _pack_grid_codes(codes_2d: np.ndarray, codebook_size: int) -> int:
+    """
+    Exact row-major base-K packing of a small code grid into a single Python int.
+    """
+    K = int(codebook_size)
+    if K <= 1:
+        raise ValueError(f"codebook_size must be >= 2 for packing; got {K}")
+    flat = np.asarray(codes_2d, dtype=np.int64).ravel()
+    out = 0
+    base = 1
+    for v in flat.tolist():
+        vv = int(v)
+        if vv < 0 or vv >= K:
+            raise ValueError(f"grid code {vv} outside [0, {K})")
+        out += vv * base
+        base *= K
+    return int(out)
 
-def _grid_key_from_codes(codes_2d: np.ndarray) -> np.uint64:
-    """
-    Deterministic 64-bit FNV-1a style hash over a small grid (e.g., 2x2 or 3x3).
-    Returns np.uint64 (0..2^64-1).
-    """
-    flat = (np.asarray(codes_2d, dtype=np.uint64).ravel() + np.uint64(1))
-    h = 1469598103934665603
-    prime = 1099511628211
-    mask = (1 << 64) - 1
-    for v in flat:
-        h = ((h ^ int(v)) * prime) & mask
-    return np.uint64(h)
+
+def _effective_codebook_size(codebook_size: int, grid_size: Tuple[int, int]) -> int:
+    Gh, Gw = int(grid_size[0]), int(grid_size[1])
+    return int(int(codebook_size) ** int(Gh * Gw))
+
+
+def _save_dataset_npz(path: str, obs_arr: np.ndarray, transitions: Optional[Dict[str, np.ndarray]] = None):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    payload: Dict[str, np.ndarray] = {"obs": np.asarray(obs_arr, dtype=np.float32)}
+    if transitions is not None:
+        for k, v in transitions.items():
+            payload[f"trans_{k}"] = np.asarray(v)
+    np.savez_compressed(path, **payload)
+    print(f"[vqvae] saved dataset -> {path}")
+
+
+def _load_dataset_npz(path: str) -> Tuple[np.ndarray, Optional[Dict[str, np.ndarray]]]:
+    data = np.load(path, allow_pickle=False)
+    obs_arr = np.asarray(data["obs"], dtype=np.float32)
+    transitions = None
+    trans_keys = [k for k in data.files if k.startswith("trans_")]
+    if trans_keys:
+        transitions = {k[len("trans_"):]: np.asarray(data[k]) for k in trans_keys}
+    print(f"[vqvae] loaded dataset <- {path} (N={obs_arr.shape[0]})")
+    return obs_arr, transitions
 
 
 def _to_tensor_batch(obs_batch: np.ndarray, device: str) -> torch.Tensor:
@@ -288,10 +309,10 @@ def _compute_sa_stats(
     #     keys2 = np.asarray([_grid_key_from_codes(c2[i]) for i in range(c2.shape[0])], dtype=np.uint64)
 
     elif c.ndim == 3:
-        keys = np.fromiter((_grid_key_from_codes(c[i]) for i in range(c.shape[0])),
-                       dtype=np.uint64, count=c.shape[0])
-        keys2 = np.fromiter((_grid_key_from_codes(c2[i]) for i in range(c2.shape[0])),
-                        dtype=np.uint64, count=c2.shape[0])
+        keys = np.fromiter((_pack_grid_codes(c[i], codebook_size) for i in range(c.shape[0])),
+                       dtype=np.int64, count=c.shape[0])
+        keys2 = np.fromiter((_pack_grid_codes(c2[i], codebook_size) for i in range(c2.shape[0])),
+                        dtype=np.int64, count=c2.shape[0])
 
         def next_entropy(counter_dict: Dict[int, int]) -> float:
             counts = np.asarray(list(counter_dict.values()), dtype=np.int64)
@@ -397,11 +418,16 @@ def _compute_sa_stats(
     for thr_i, v in frac_ge.items():
         out[f"grouping/trans_frac_in_ca_bucket_ge_{thr_i}"] = float(v)
 
-    # Only keep the old “possible pairs” coverage metric in single-code mode (where K is meaningful)
-    if c.ndim == 1:
-        A_obs = int(np.max(act_s) + 1) if act_s.size > 0 else 0
-        out["grouping/ca_pairs_possible_in_sample"] = float(codebook_size * A_obs) if A_obs > 0 else 0.0
-        out["grouping/ca_pairs_coverage_frac"] = float(len(counts) / float(codebook_size * A_obs)) if A_obs > 0 else 0.0
+    # Coverage over latent group-action space. In grid mode this uses the exact effective codebook size K^(Gh*Gw).
+    A_obs = int(np.max(act_s) + 1) if act_s.size > 0 else 0
+    if A_obs > 0:
+        if c.ndim == 1:
+            possible_groups = int(codebook_size)
+        else:
+            possible_groups = _effective_codebook_size(int(codebook_size), (int(c.shape[1]), int(c.shape[2])))
+        out["grouping/effective_codebook_size"] = float(possible_groups)
+        out["grouping/ca_pairs_possible_in_sample"] = float(possible_groups * A_obs)
+        out["grouping/ca_pairs_coverage_frac"] = float(len(counts) / float(possible_groups * A_obs))
 
     return out
 
@@ -537,40 +563,81 @@ def main(cfg: DictConfig):
     collect_steps = int(cfg.train.collect_steps)
     compute_sa = bool(cfg.diagnostics.compute_sa_stats)
 
+    load_dataset_path = getattr(cfg.outputs, "load_dataset_path", None)
+    save_dataset_path = getattr(cfg.outputs, "save_dataset_path", None)
+    dataset_only = bool(getattr(cfg.train, "dataset_only", False))
+
     global_step_start = collect_steps  # training begins after data collection
 
     obs_list: List[np.ndarray] = []
     trans = {"obs": [], "act": [], "rew": [], "done": [], "next_obs": []}
 
-    # Collect data
-    for t in range(collect_steps):
-        a = env.action_space.sample()
-        next_obs, r, terminated, truncated, _info = env.step(a)
-        d = bool(terminated or truncated)
-
-        o_ad = obs_adapter(obs)
-        no_ad = obs_adapter(next_obs)
-        obs_list.append(o_ad)
-
-        if compute_sa:
-            trans["obs"].append(o_ad)
-            trans["act"].append(int(a))
-            trans["rew"].append(float(r))
-            trans["done"].append(1.0 if d else 0.0)
-            trans["next_obs"].append(no_ad)
-
-        obs = next_obs
-        if d:
-            obs, _ = env.reset()
-
-        if (t > 0) and (t % 50_000 == 0):
-            log_metrics({"vqvae/collect_step": float(t)}, step=int(t))
-
+    # Load or collect data
+    if load_dataset_path is not None and str(load_dataset_path) not in ("", "None", "none", "null"):
+        obs_arr, transitions_loaded = _load_dataset_npz(str(load_dataset_path))
+        if transitions_loaded is not None:
+            trans = {k: list(v) for k, v in transitions_loaded.items()}
+            compute_sa = True
+    else:
+        # Collect data
+        for t in range(collect_steps):
+            a = env.action_space.sample()
+            next_obs, r, terminated, truncated, _info = env.step(a)
+            d = bool(terminated or truncated)
+    
+            o_ad = obs_adapter(obs)
+            no_ad = obs_adapter(next_obs)
+            obs_list.append(o_ad)
+    
+            if compute_sa:
+                trans["obs"].append(o_ad)
+                trans["act"].append(int(a))
+                trans["rew"].append(float(r))
+                trans["done"].append(1.0 if d else 0.0)
+                trans["next_obs"].append(no_ad)
+    
+            obs = next_obs
+            if d:
+                obs, _ = env.reset()
+    
+            if (t > 0) and (t % 50_000 == 0):
+                log_metrics({"vqvae/collect_step": float(t)}, step=int(t))
+    
     env.close()
     if eval_env is not None:
         eval_env.close()
 
-    obs_arr = np.asarray(obs_list, dtype=np.float32)  # (N,C,H,W)
+    if load_dataset_path is None or str(load_dataset_path) in ("", "None", "none", "null"):
+        obs_arr = np.asarray(obs_list, dtype=np.float32)  # (N,C,H,W)
+        transitions_np = None
+        if compute_sa:
+            transitions_np = {
+                "obs": np.asarray(trans["obs"], dtype=np.float32),
+                "act": np.asarray(trans["act"], dtype=np.int64),
+                "rew": np.asarray(trans["rew"], dtype=np.float32),
+                "done": np.asarray(trans["done"], dtype=np.float32),
+                "next_obs": np.asarray(trans["next_obs"], dtype=np.float32),
+            }
+        if save_dataset_path is not None and str(save_dataset_path) not in ("", "None", "none", "null"):
+            _save_dataset_npz(str(save_dataset_path), obs_arr=obs_arr, transitions=transitions_np)
+        if dataset_only:
+            if run is not None:
+                run.finish()
+            return
+    else:
+        # already loaded from disk
+        if compute_sa and trans:
+            transitions_np = {
+                "obs": np.asarray(trans["obs"], dtype=np.float32),
+                "act": np.asarray(trans["act"], dtype=np.int64),
+                "rew": np.asarray(trans["rew"], dtype=np.float32),
+                "done": np.asarray(trans["done"], dtype=np.float32),
+                "next_obs": np.asarray(trans["next_obs"], dtype=np.float32),
+            }
+        else:
+            transitions_np = None
+
+    obs_arr = np.asarray(obs_arr, dtype=np.float32)
     if obs_arr.ndim != 4:
         raise ValueError(f"Expected collected obs shape (N,C,H,W); got {obs_arr.shape}")
 
@@ -721,19 +788,11 @@ def main(cfg: DictConfig):
     )
     log_metrics(code_metrics, step=int(global_step_end))
 
-    if compute_sa:
-        transitions = {
-            "obs": np.asarray(trans["obs"], dtype=np.float32),
-            "act": np.asarray(trans["act"], dtype=np.int64),
-            "rew": np.asarray(trans["rew"], dtype=np.float32),
-            "done": np.asarray(trans["done"], dtype=np.float32),
-            "next_obs": np.asarray(trans["next_obs"], dtype=np.float32),
-        }
-
+    if compute_sa and transitions_np is not None:
         bucket_thresholds = list(OmegaConf.select(cfg, "diagnostics.bucket_thresholds", default=[5, 10, 50, 100]))
         sa_metrics = _compute_sa_stats(
             model=model,
-            transitions=transitions,
+            transitions=transitions_np,
             device=device,
             codebook_size=codebook_size,
             sa_eval_sample_size=int(cfg.diagnostics.sa_eval_sample_size),
