@@ -49,6 +49,10 @@ class VQVAETrainCfg:
     dump_examples_path: Optional[str] = "artifacts/vqvae_group_examples.txt"
 
 
+def _path_is_set(path: Optional[str]) -> bool:
+    return path is not None and str(path) not in ("", "None", "none", "null")
+
+
 def _parse_grid_size(v) -> Tuple[int, int]:
     """
     Accepts:
@@ -194,13 +198,11 @@ def _compute_code_metrics(
     K = int(codebook_size)
 
     if codes.ndim == 1:
-        # (m,)
         codes_flat = codes
         Gh = Gw = 1
         any_code_mask = lambda k: (codes == k)
         uniq_per_frame = np.ones((m,), dtype=np.int64)
     elif codes.ndim == 3:
-        # (m,Gh,Gw)
         Gh, Gw = int(codes.shape[1]), int(codes.shape[2])
         codes_flat = codes.reshape(-1)
         any_code_mask = lambda k: np.any(codes == k, axis=(1, 2))
@@ -216,7 +218,6 @@ def _compute_code_metrics(
     H = _entropy_from_counts(counts)
     perplexity = float(np.exp(H))
 
-    # intra-code variance proxy on frames that contain code k (any patch)
     intra_vars = []
     max_frames_per_code = 256
     for k in range(K):
@@ -230,7 +231,7 @@ def _compute_code_metrics(
         if xb.shape[0] > max_frames_per_code:
             pick = np.random.choice(xb.shape[0], size=max_frames_per_code, replace=False)
             xb = xb[pick]
-        mu_k = xb.mean(axis=0)          # (C,H,W)
+        mu_k = xb.mean(axis=0)
         var_k = float(np.mean(mu_k * (1.0 - mu_k)))
         intra_vars.append(var_k)
 
@@ -265,7 +266,7 @@ def _compute_sa_stats(
     Computes (state_key, action)-level diagnostics for latent grouping quality.
 
     - single-code mode: state_key is the code id (int)
-    - grid-code mode:   state_key is a 64-bit hash of the (Gh,Gw) code grid
+    - grid-code mode:   state_key is the exact base-K packed code of the (Gh,Gw) code grid
 
     Also computes entropy of next_state_key distribution within each (state_key, action).
     """
@@ -295,7 +296,6 @@ def _compute_sa_stats(
     c = c_t.detach().cpu().numpy().astype(np.int64)
     c2 = c2_t.detach().cpu().numpy().astype(np.int64)
 
-    # Build state keys
     if c.ndim == 1:
         keys = c.astype(np.int64)
         keys2 = c2.astype(np.int64)
@@ -304,15 +304,17 @@ def _compute_sa_stats(
             counts = np.asarray(list(counter_dict.values()), dtype=np.int64)
             return _entropy_from_counts(counts)
 
-    # elif c.ndim == 3:
-    #     keys  = np.asarray([_grid_key_from_codes(c[i])  for i in range(c.shape[0])], dtype=np.uint64)
-    #     keys2 = np.asarray([_grid_key_from_codes(c2[i]) for i in range(c2.shape[0])], dtype=np.uint64)
-
     elif c.ndim == 3:
-        keys = np.fromiter((_pack_grid_codes(c[i], codebook_size) for i in range(c.shape[0])),
-                       dtype=np.int64, count=c.shape[0])
-        keys2 = np.fromiter((_pack_grid_codes(c2[i], codebook_size) for i in range(c2.shape[0])),
-                        dtype=np.int64, count=c2.shape[0])
+        keys = np.fromiter(
+            (_pack_grid_codes(c[i], codebook_size) for i in range(c.shape[0])),
+            dtype=np.int64,
+            count=c.shape[0],
+        )
+        keys2 = np.fromiter(
+            (_pack_grid_codes(c2[i], codebook_size) for i in range(c2.shape[0])),
+            dtype=np.int64,
+            count=c2.shape[0],
+        )
 
         def next_entropy(counter_dict: Dict[int, int]) -> float:
             counts = np.asarray(list(counter_dict.values()), dtype=np.int64)
@@ -321,12 +323,11 @@ def _compute_sa_stats(
     else:
         raise ValueError(f"encode_indices returned unexpected shape {c.shape}")
 
-    # Aggregate per (key, action)
     counts = defaultdict(int)
     rew_sum = defaultdict(float)
     rew_sumsq = defaultdict(float)
     done_sum = defaultdict(float)
-    next_counts = defaultdict(lambda: defaultdict(int))  # per (key,a): next_key -> count
+    next_counts = defaultdict(lambda: defaultdict(int))
 
     for ki, ai, ri, di, k2i in zip(keys, act_s, rew_s, done_s, keys2):
         key = (int(ki), int(ai))
@@ -359,7 +360,6 @@ def _compute_sa_stats(
         thr_i = int(thr)
         frac_ge[thr_i] = float(np.mean(per_transition_bucket_size >= thr_i))
 
-    # summarize keys with enough support
     ent_list = []
     rstd_list = []
     done_list = []
@@ -404,21 +404,18 @@ def _compute_sa_stats(
         "grouping/sa_done_rate_mean": done_mean,
         "grouping/sa_done_rate_p90": done_p90,
         "grouping/sa_done_rate_max": done_max,
-
         "grouping/ca_bucket_count_mean": bs_mean,
         "grouping/ca_bucket_count_p10": bs_p10,
         "grouping/ca_bucket_count_p50": bs_p50,
         "grouping/ca_bucket_count_p90": bs_p90,
         "grouping/ca_bucket_count_min": bs_min,
         "grouping/ca_bucket_count_max": bs_max,
-
         "grouping/ca_pairs_observed": float(len(counts)),
     }
 
     for thr_i, v in frac_ge.items():
         out[f"grouping/trans_frac_in_ca_bucket_ge_{thr_i}"] = float(v)
 
-    # Coverage over latent group-action space. In grid mode this uses the exact effective codebook size K^(Gh*Gw).
     A_obs = int(np.max(act_s) + 1) if act_s.size > 0 else 0
     if A_obs > 0:
         if c.ndim == 1:
@@ -507,7 +504,7 @@ def _dump_top_codes(
             continue
 
         mask = frame_has_code(int(k))
-        xb = sample[mask]  # frames containing code k (any patch in grid mode)
+        xb = sample[mask]
 
         lines.append("[mean map]")
         lines.append(_ascii_mean_map(xb) if xb.shape[0] > 0 else "<no frames>")
@@ -542,23 +539,13 @@ def main(cfg: DictConfig):
     from src.envs.registry import make_env
     from src.utils.wandb_utils import setup_wandb, log_metrics
 
-    # Seed
     set_global_seeds(int(cfg.seed))
 
-    # Device
     device = str(cfg.device)
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # W&B
     run = setup_wandb(cfg, config_dict=OmegaConf.to_container(cfg, resolve=True))
-
-    # Env via registry
-    env, eval_env, obs_adapter = make_env(cfg.env, seed=int(cfg.seed))
-    print(f"[vqvae] env_id={cfg.env.id}")
-    print(f"[vqvae] obs_space={env.observation_space} action_space={env.action_space} n_actions={getattr(env.action_space,'n',None)}")
-
-    obs, _ = env.reset(seed=int(cfg.seed))
 
     collect_steps = int(cfg.train.collect_steps)
     compute_sa = bool(cfg.diagnostics.compute_sa_stats)
@@ -567,49 +554,58 @@ def main(cfg: DictConfig):
     save_dataset_path = getattr(cfg.outputs, "save_dataset_path", None)
     dataset_only = bool(getattr(cfg.train, "dataset_only", False))
 
-    global_step_start = collect_steps  # training begins after data collection
+    using_cached_dataset = _path_is_set(load_dataset_path)
+    global_step_start = 0 if using_cached_dataset else collect_steps
 
     obs_list: List[np.ndarray] = []
-    trans = {"obs": [], "act": [], "rew": [], "done": [], "next_obs": []}
+    transitions_np: Optional[Dict[str, np.ndarray]] = None
 
-    # Load or collect data
-    if load_dataset_path is not None and str(load_dataset_path) not in ("", "None", "none", "null"):
+    if using_cached_dataset:
         obs_arr, transitions_loaded = _load_dataset_npz(str(load_dataset_path))
-        if transitions_loaded is not None:
-            trans = {k: list(v) for k, v in transitions_loaded.items()}
-            compute_sa = True
+        if compute_sa and transitions_loaded is not None:
+            transitions_np = {
+                "obs": np.asarray(transitions_loaded["obs"], dtype=np.float32),
+                "act": np.asarray(transitions_loaded["act"], dtype=np.int64),
+                "rew": np.asarray(transitions_loaded["rew"], dtype=np.float32),
+                "done": np.asarray(transitions_loaded["done"], dtype=np.float32),
+                "next_obs": np.asarray(transitions_loaded["next_obs"], dtype=np.float32),
+            }
     else:
-        # Collect data
+        env, eval_env, obs_adapter = make_env(cfg.env, seed=int(cfg.seed))
+        print(f"[vqvae] env_id={cfg.env.id}")
+        print(f"[vqvae] obs_space={env.observation_space} action_space={env.action_space} n_actions={getattr(env.action_space,'n',None)}")
+
+        obs, _ = env.reset(seed=int(cfg.seed))
+        trans = {"obs": [], "act": [], "rew": [], "done": [], "next_obs": []}
+
         for t in range(collect_steps):
             a = env.action_space.sample()
             next_obs, r, terminated, truncated, _info = env.step(a)
             d = bool(terminated or truncated)
-    
+
             o_ad = obs_adapter(obs)
             no_ad = obs_adapter(next_obs)
             obs_list.append(o_ad)
-    
+
             if compute_sa:
                 trans["obs"].append(o_ad)
                 trans["act"].append(int(a))
                 trans["rew"].append(float(r))
                 trans["done"].append(1.0 if d else 0.0)
                 trans["next_obs"].append(no_ad)
-    
+
             obs = next_obs
             if d:
                 obs, _ = env.reset()
-    
+
             if (t > 0) and (t % 50_000 == 0):
                 log_metrics({"vqvae/collect_step": float(t)}, step=int(t))
-    
-    env.close()
-    if eval_env is not None:
-        eval_env.close()
 
-    if load_dataset_path is None or str(load_dataset_path) in ("", "None", "none", "null"):
-        obs_arr = np.asarray(obs_list, dtype=np.float32)  # (N,C,H,W)
-        transitions_np = None
+        env.close()
+        if eval_env is not None:
+            eval_env.close()
+
+        obs_arr = np.asarray(obs_list, dtype=np.float32)
         if compute_sa:
             transitions_np = {
                 "obs": np.asarray(trans["obs"], dtype=np.float32),
@@ -618,32 +614,19 @@ def main(cfg: DictConfig):
                 "done": np.asarray(trans["done"], dtype=np.float32),
                 "next_obs": np.asarray(trans["next_obs"], dtype=np.float32),
             }
-        if save_dataset_path is not None and str(save_dataset_path) not in ("", "None", "none", "null"):
+
+        if _path_is_set(save_dataset_path):
             _save_dataset_npz(str(save_dataset_path), obs_arr=obs_arr, transitions=transitions_np)
-        if dataset_only:
-            if run is not None:
-                run.finish()
-            return
-    else:
-        # already loaded from disk
-        if compute_sa and trans:
-            transitions_np = {
-                "obs": np.asarray(trans["obs"], dtype=np.float32),
-                "act": np.asarray(trans["act"], dtype=np.int64),
-                "rew": np.asarray(trans["rew"], dtype=np.float32),
-                "done": np.asarray(trans["done"], dtype=np.float32),
-                "next_obs": np.asarray(trans["next_obs"], dtype=np.float32),
-            }
-        else:
-            transitions_np = None
+
+    if dataset_only:
+        if run is not None:
+            run.finish()
+        return
 
     obs_arr = np.asarray(obs_arr, dtype=np.float32)
     if obs_arr.ndim != 4:
         raise ValueError(f"Expected collected obs shape (N,C,H,W); got {obs_arr.shape}")
 
-    # -------------------------
-    # Build model
-    # -------------------------
     codebook_size = int(cfg.vqvae.codebook_size)
     embed_dim = int(cfg.vqvae.embed_dim)
     hidden_channels = int(cfg.vqvae.hidden_channels)
@@ -651,18 +634,17 @@ def main(cfg: DictConfig):
 
     grid_size = _parse_grid_size(OmegaConf.select(cfg, "vqvae.grid_size", default=1))
 
-    obs_shape = tuple(obs_arr.shape[1:])  # (C,H,W)
+    obs_shape = tuple(obs_arr.shape[1:])
     in_channels = int(obs_arr.shape[1])
 
     eval_only = bool(getattr(cfg.train, "eval_only", False))
     load_path = getattr(cfg.outputs, "load_path", None)
 
     if eval_only:
-        if load_path is None or str(load_path) == "" or str(load_path).lower() == "none":
+        if not _path_is_set(load_path):
             raise ValueError("train.eval_only=true requires outputs.load_path to point to a saved vqvae checkpoint.")
 
         ckpt, vcfg = _load_vqvae_ckpt(str(load_path), device=device)
-
         grid_size = _parse_grid_size(vcfg.get("grid_size", 1))
 
         model = VQVAE(
@@ -678,8 +660,7 @@ def main(cfg: DictConfig):
         model.eval()
 
         codebook_size = int(vcfg["codebook_size"])
-        train_steps = 0
-        global_step_end = int(collect_steps + train_steps)
+        global_step_end = int(global_step_start)
         print(f"[vqvae] eval-only: loaded {load_path} (K={codebook_size}, grid={grid_size})")
 
     else:
@@ -744,11 +725,8 @@ def main(cfg: DictConfig):
                     f"grid={grid_size}"
                 )
 
-        global_step_end = int(collect_steps + train_steps)
+        global_step_end = int(global_step_start + train_steps)
 
-    # -------------------------
-    # Save checkpoint
-    # -------------------------
     if not eval_only:
         save_path = str(cfg.outputs.save_path)
         save_dir = os.path.dirname(save_path)
@@ -773,9 +751,6 @@ def main(cfg: DictConfig):
         torch.save(ckpt, save_path)
         print(f"[vqvae] saved -> {save_path}")
 
-    # -------------------------
-    # Diagnostics
-    # -------------------------
     model.eval()
 
     eval_sample_size = int(cfg.diagnostics.eval_sample_size)
@@ -814,6 +789,11 @@ def main(cfg: DictConfig):
             examples_per_code=examples_per_code,
             path=dump_path,
         )
+
+    print("[vqvae][eval] code_metrics:", code_metrics)
+
+    if compute_sa and transitions_np is not None:
+        print("[vqvae][eval] sa_metrics:", sa_metrics)
 
     if run is not None:
         run.finish()

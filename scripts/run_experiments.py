@@ -108,7 +108,7 @@ def build_cfg_for_run(
     """
     Uses Hydra programmatic API to compose a config with the given overrides.
     """
-    overrides = list(base_overrides) + list(agent_overrides) + [f"seed={seed}"]
+    overrides = list(agent_overrides) + list(base_overrides) + [f"seed={seed}"]
 
     with initialize(version_base=None, config_path="../config"):
         cfg = compose(config_name="config", overrides=overrides)

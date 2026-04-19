@@ -8,6 +8,7 @@ replay:
   alpha: 0.6
   beta: 0.4
   beta_anneal_steps: 500000
+  normalize_is_weights: true
 
   sa_mitigation:
     enabled: false
