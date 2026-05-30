@@ -8,6 +8,7 @@ from .conalbandits_env import make_conal_bandit
 from .noisygridworld_env import make_noisy_gridworld
 from .outlierbandit_env import make_outlierbandit
 from .portalbridgegrid_env import make_portalbridgegrid
+from .shortcutmaze_env import make_shortcut_maze
 
 
 _ENV_MAKERS: Dict[str, Callable] = {
@@ -18,6 +19,7 @@ _ENV_MAKERS: Dict[str, Callable] = {
     "NoisyGridworld": make_noisy_gridworld,
     "OutlierBandit": make_outlierbandit,
     "PortalBridgeGrid": make_portalbridgegrid,
+    "ShortcutMaze": make_shortcut_maze,
 }
 
 def make_env(env_cfg, seed: int) -> Tuple[gym.Env, gym.Env, Callable]:

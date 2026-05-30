@@ -95,6 +95,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         # Group priority mass: s_g = sum_{i in group} p_i^alpha (leaf values)
         self.group_mass = defaultdict(float)
+        self.group_reward_sum = defaultdict(float)
 
         # group keyer (e.g., VQ-VAE)
         self.keyer = keyer
@@ -111,6 +112,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         """
         self.by_sa.clear()
         self.group_mass.clear()
+        self.group_reward_sum.clear()
         self.idx_to_key = [None] * self.capacity
         self.idx_to_pos[:] = -1
 
@@ -123,6 +125,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             self.idx_to_pos[idx] = len(lst) - 1
             leaf = float(self.tree.tree[self.tree.leaf_idx(idx)])
             self.group_mass[key] += leaf
+            self.group_reward_sum[key] += float(self.rewards[idx])
 
     def _make_key(self, obs, action: int):
         """
@@ -262,6 +265,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             self.group_mass[old_key] -= old_leaf
             if self.group_mass[old_key] <= 0.0:
                 self.group_mass.pop(old_key, None)
+            self.group_reward_sum[old_key] -= float(self.rewards[self.pos])
+            if old_key not in self.by_sa:
+                self.group_reward_sum.pop(old_key, None)
 
         # Write transition
         self.obs[self.pos] = obs
@@ -276,6 +282,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         lst.append(self.pos)
         self.idx_to_pos[self.pos] = len(lst) - 1
         self.idx_to_key[self.pos] = key
+        self.group_reward_sum[key] += float(self.rewards[self.pos])
 
         # New leaf priority (stored as p^alpha)
         new_leaf = float(max(self.max_priority, 1e-6) ** self.alpha)
@@ -288,6 +295,12 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             self.current_size += 1
             if self.current_size == self.capacity:
                 self.full = True
+
+    def group_reward_mean(self, key) -> float:
+        lst = self.by_sa.get(key, [])
+        if not lst:
+            raise RuntimeError(f"Cannot compute reward mean for empty group {key}")
+        return float(self.group_reward_sum.get(key, 0.0) / float(len(lst)))
 
     def __len__(self) -> int:
         return int(self.current_size)
@@ -438,6 +451,11 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             else:
                 want = cap
                 if include_self:
+                    # include_self=True means the anchor is eligible, not forced.
+                    # For capped AVG this is crucial: forcing the PER-selected
+                    # anchor into every K-subset reintroduces within-group PER
+                    # tilt with weight 1/K. A uniform K-subset has the same
+                    # conditional expectation as SAMPLE and lower variance.
                     if n <= want:
                         g = list(lst)
                     else:

@@ -221,3 +221,25 @@ old_old_results/
 commit.txt
 *.zip
 *.sh
+
+# Local research artifacts are intentionally excluded from the reviewer code release.
+analysis/
+data-for-analysis/
+last_logs/
+paper-draft/
+paper-final/
+submission_check/
+submission_zip_test/
+wandb_raw_*.csv
+
+# One-off analysis drivers depend on local cached runs and are not release entrypoints.
+scripts/comprehensive_analysis.py
+scripts/ewrl_deep_analysis.py
+scripts/export_data_for_analysis.py
+scripts/extract_returns_wandb.py
+scripts/frozenlake_final_results_analysis.py
+scripts/make_minatar_missing_manifest.py
+scripts/make_paper_final_assets.py
+scripts/make_supervisor_meeting_may22.py
+scripts/minatar_allseed_analysis.py
+scripts/minatar_final_results_analysis.py

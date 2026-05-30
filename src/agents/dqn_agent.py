@@ -219,6 +219,29 @@ class DQNAgent:
 
     # Replay push / sample
     def _push_transition(self, o, a, r, no, terminated, truncated):
+        if self.env_model is not None:
+            pos = int(getattr(self.replay, "pos", -1))
+            idx_to_key = getattr(self.replay, "idx_to_key", None)
+
+            if idx_to_key is not None and 0 <= pos < len(idx_to_key) and idx_to_key[pos] is not None:
+                old_s_arr = np.asarray(self.replay.obs[pos])
+                old_s_next_arr = np.asarray(self.replay.next_obs[pos])
+
+                if old_s_arr.ndim != 0 or old_s_next_arr.ndim != 0:
+                    raise ValueError(
+                        f"TabularDynamicsModel expects scalar discrete observations, not "
+                        f"{old_s_arr.shape} and {old_s_next_arr.shape}."
+                    )
+
+                self.env_model.unobserve(
+                    s=int(old_s_arr.reshape(())),
+                    a=int(self.replay.actions[pos]),
+                    r=float(self.replay.rewards[pos]),
+                    s_next=int(old_s_next_arr.reshape(())),
+                    terminated=bool(self.replay.terminated[pos]),
+                    truncated=bool(self.replay.truncated[pos]),
+                )
+
         self.replay.add(o, a, r, no, terminated, truncated)
 
         if self.env_model is not None:
@@ -412,64 +435,106 @@ class DQNAgent:
                 use_next_obs = False
                 max_group = int(getattr(mit_cfg, "max_group", 0))
                 gamma = float(self.cfg.agents.gamma)
-
-                groups = self.replay.sibling_groups(
-                    batch["indices"],
-                    include_self=include_self,
-                    min_group=min_group,
-                    max_group=max_group,
-                )
-
-                for idx_i, g in zip(batch["indices"], groups):
-                    if g is None or len(g) == 0:
-                        raise RuntimeError(f"AVG invariant violated: empty sibling group for sampled idx={int(idx_i)}")
-
-                groups_used = [[int(x) for x in g] for g in groups]
-                group_sizes_used = np.array([len(g) for g in groups_used], dtype=np.int64)
-                mit_avg_valid_group_frac = 1.0
-
-                all_unique = np.unique(np.concatenate([np.asarray(g, dtype=np.int64) for g in groups_used]))
-                fetched = self.replay.fetch(all_unique)
-
-                rewards_u = fetched["rewards"].astype(np.float32)
-                term_u = fetched["terminated"].astype(np.float32)
-                trunc_u = fetched["truncated"].astype(np.float32)
-                if self.cfg.agents.handle_time_limit_as_terminal:
-                    done_u = np.maximum(term_u, trunc_u)
-                else:
-                    done_u = term_u
-
-                next_obs_u = fetched["next_obs"]
-
-                x_next_np = _adapt_obs_batch_np(next_obs_u)
-                x_next_u = torch.from_numpy(x_next_np).to(self.device)
-
-                if self.model_type == "mlp":
-                    x_next_u = x_next_u.view(x_next_u.size(0), -1)
-
-                with torch.no_grad():
-                    q_online = self.q_net(x_next_u)
-                    a_star = q_online.argmax(dim=1)
-                    q_tgt = self.target_q_net(x_next_u)
-                    v_u = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1).detach().cpu().numpy()
-
-                targets_u = rewards_u + (1.0 - done_u) * gamma * v_u
-                pos = {int(idx): k for k, idx in enumerate(fetched["indices"])}
+                update_all_siblings = bool(getattr(mit_cfg, "update_all_siblings", False))
 
                 B = len(batch["indices"])
                 target_agg = np.empty((B,), dtype=np.float32)
-                var_list = []
-                for i, g in enumerate(groups_used):
-                    t = np.asarray([targets_u[pos[int(j)]] for j in g], dtype=np.float32)
-                    target_agg[i] = float(t.mean())
-                    var_list.append(float(np.var(t)))
 
-                batch["target_agg"] = target_agg
-                batch["mit_avg_groups_used"] = groups_used
-                batch["mit_unique_sibling_indices"] = int(all_unique.size)
-                batch["mit_total_sibling_refs"] = int(sum(len(g) for g in groups_used))
-                batch["mit_target_var_mean"] = float(np.mean(var_list)) if var_list else 0.0
-                batch["mit_target_var_max"] = float(np.max(var_list)) if var_list else 0.0
+                fast_reward_mean = (
+                    gamma == 0.0
+                    and include_self
+                    and max_group == 0
+                    and hasattr(self.replay, "group_reward_mean")
+                )
+
+                if fast_reward_mean:
+                    group_sizes = []
+                    seen_keys = set()
+                    total_refs = 0
+                    for i, idx_i in enumerate(batch["indices"]):
+                        idx_i = int(idx_i)
+                        key = self.replay.idx_to_key[idx_i]
+                        if key is None:
+                            raise RuntimeError(f"AVG invariant violated: idx_to_key[{idx_i}] is None")
+                        group = self.replay.by_sa.get(key, [])
+                        if len(group) < min_group:
+                            raise RuntimeError(f"AVG invariant violated: empty sibling group for sampled idx={idx_i}")
+                        target_agg[i] = float(self.replay.group_reward_mean(key))
+                        group_sizes.append(len(group))
+                        if key not in seen_keys:
+                            total_refs += len(group)
+                            seen_keys.add(key)
+
+                    group_sizes_used = np.asarray(group_sizes, dtype=np.int64)
+                    mit_avg_valid_group_frac = 1.0
+                    batch["target_agg"] = target_agg
+                    if update_all_siblings:
+                        batch["mit_avg_group_keys_used"] = [
+                            self.replay.idx_to_key[int(idx_i)] for idx_i in batch["indices"]
+                        ]
+                    batch["mit_unique_sibling_indices"] = int(total_refs)
+                    batch["mit_total_sibling_refs"] = int(sum(group_sizes))
+                    batch["mit_target_var_mean"] = 0.0
+                    batch["mit_target_var_max"] = 0.0
+                else:
+                    groups = self.replay.sibling_groups(
+                        batch["indices"],
+                        include_self=include_self,
+                        min_group=min_group,
+                        max_group=max_group,
+                    )
+
+                    for idx_i, g in zip(batch["indices"], groups):
+                        if g is None or len(g) == 0:
+                            raise RuntimeError(f"AVG invariant violated: empty sibling group for sampled idx={int(idx_i)}")
+
+                    groups_used = [[int(x) for x in g] for g in groups]
+                    group_sizes_used = np.array([len(g) for g in groups_used], dtype=np.int64)
+                    mit_avg_valid_group_frac = 1.0
+
+                    all_unique = np.unique(np.concatenate([np.asarray(g, dtype=np.int64) for g in groups_used]))
+                    fetched = self.replay.fetch(all_unique)
+
+                    rewards_u = fetched["rewards"].astype(np.float32)
+                    term_u = fetched["terminated"].astype(np.float32)
+                    trunc_u = fetched["truncated"].astype(np.float32)
+                    if self.cfg.agents.handle_time_limit_as_terminal:
+                        done_u = np.maximum(term_u, trunc_u)
+                    else:
+                        done_u = term_u
+
+                    if gamma == 0.0 or bool(np.all(done_u >= 1.0)):
+                        targets_u = rewards_u
+                    else:
+                        next_obs_u = fetched["next_obs"]
+
+                        x_next_np = _adapt_obs_batch_np(next_obs_u)
+                        x_next_u = torch.from_numpy(x_next_np).to(self.device)
+
+                        if self.model_type == "mlp":
+                            x_next_u = x_next_u.view(x_next_u.size(0), -1)
+
+                        with torch.no_grad():
+                            q_online = self.q_net(x_next_u)
+                            a_star = q_online.argmax(dim=1)
+                            q_tgt = self.target_q_net(x_next_u)
+                            v_u = q_tgt.gather(1, a_star.unsqueeze(1)).squeeze(1).detach().cpu().numpy()
+
+                        targets_u = rewards_u + (1.0 - done_u) * gamma * v_u
+                    pos = {int(idx): k for k, idx in enumerate(fetched["indices"])}
+
+                    var_list = []
+                    for i, g in enumerate(groups_used):
+                        t = np.asarray([targets_u[pos[int(j)]] for j in g], dtype=np.float32)
+                        target_agg[i] = float(t.mean())
+                        var_list.append(float(np.var(t)))
+
+                    batch["target_agg"] = target_agg
+                    batch["mit_avg_groups_used"] = groups_used
+                    batch["mit_unique_sibling_indices"] = int(all_unique.size)
+                    batch["mit_total_sibling_refs"] = int(sum(len(g) for g in groups_used))
+                    batch["mit_target_var_mean"] = float(np.mean(var_list)) if var_list else 0.0
+                    batch["mit_target_var_max"] = float(np.max(var_list)) if var_list else 0.0
 
             elif method == "model":
                 for bi, (s_raw, a_raw) in enumerate(zip(batch["obs"], batch["actions"])):
@@ -571,6 +636,8 @@ class DQNAgent:
             out["target_agg"] = torch.as_tensor(batch["target_agg"], dtype=torch.float32, device=self.device)
         if "mit_avg_groups_used" in batch:
             out["mit_avg_groups_used"] = batch["mit_avg_groups_used"]
+        if "mit_avg_group_keys_used" in batch:
+            out["mit_avg_group_keys_used"] = batch["mit_avg_group_keys_used"]
 
         if "mit_unique_sibling_indices" in batch:
             out["mit_unique_sibling_indices"] = int(batch["mit_unique_sibling_indices"])
@@ -880,7 +947,22 @@ class DQNAgent:
 
                         if update_all and method == "avg":
                             groups_used = batch.get("mit_avg_groups_used", None)
-                            if groups_used is None:
+                            group_keys_used = batch.get("mit_avg_group_keys_used", None)
+                            if group_keys_used is not None:
+                                key_to_prio: Dict[Any, float] = {}
+                                for i, key in enumerate(group_keys_used):
+                                    pval = float(prios[i])
+                                    prev = key_to_prio.get(key, -1.0)
+                                    if pval > prev:
+                                        key_to_prio[key] = pval
+                                idx_list = []
+                                prio_list = []
+                                for key, pval in key_to_prio.items():
+                                    for j in self.replay.by_sa.get(key, []):
+                                        idx_list.append(int(j))
+                                        prio_list.append(float(pval))
+                                self.replay.update_priorities(idx_list, prio_list)
+                            elif groups_used is None:
                                 self.replay.update_priorities(upd_indices, prios)
                             else:
                                 prio_map: Dict[int, float] = {}

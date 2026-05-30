@@ -57,7 +57,7 @@ AGENT_VARIANTS = {
             "agents.replay.sa_mitigation.method=avg",
             "agents.replay.sa_mitigation.include_self=true",
             "agents.replay.sa_mitigation.min_group=1",
-            # "agents.replay.sa_mitigation.max_group=0",
+            "agents.replay.sa_mitigation.max_group=4",
             "agents.replay.sa_mitigation.update_all_siblings=true",
         ],
     },
@@ -152,6 +152,7 @@ def run_single_seed(
         env_key = f"{env_id}-{map_name}"
     else:
         env_key = env_id
+    env_key = env_key.replace("/", "-")
 
     # W&B settings for this experiment
     cfg.wandb.job_type = "training"
@@ -300,7 +301,7 @@ def run_multi_seed(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Multi-seed PER bias experiments on FrozenLake-8x8.")
+    parser = argparse.ArgumentParser(description="Run multi-seed replay-bias experiments.")
     parser.add_argument(
         "--agent",
         type=str,
@@ -326,7 +327,7 @@ def parse_args():
         type=str,
         nargs="*",
         default=[],
-        help="Additional Hydra-style overrides, e.g. env=frozenlake8x8 train.total_steps=200000",
+        help="Additional Hydra-style overrides, e.g. env=frozenlake train.total_steps=200000",
     )
     return parser.parse_args()
 

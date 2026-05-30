@@ -1,0 +1,11 @@
+numpy>=2.0
+pandas>=2.0
+matplotlib>=3.8
+seaborn>=0.13
+PyYAML>=6.0
+gymnasium>=1.2.2
+hydra-core>=1.3
+omegaconf>=2.3
+torch>=2.2
+wandb>=0.17
+minatar==1.0.15

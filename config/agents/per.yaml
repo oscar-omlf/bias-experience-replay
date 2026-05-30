@@ -15,13 +15,14 @@ replay:
     method: none   # avg | sample | model |none
     include_self: true
     min_group: 1
-    max_group: 0
+    # AVG uses a uniform subset of this size. Set to 0 to average the full group.
+    max_group: 4
     update_all_siblings: false
 
   grouping:
     enabled: false
     type: vqvae
-    ckpt_path: "artifacts/vqvae_minatar_breakout.pt"
+    ckpt_path: "artifacts/vqvae_breakout_2x1_k16_d64_b025.pt"
     device: "cpu"
     cache_size: 200000
 

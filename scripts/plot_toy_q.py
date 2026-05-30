@@ -5,7 +5,7 @@ from typing import List, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 
-TOY_ENV_KEY = "ToyPERBias-v0"
+TOY_ENV_KEY = "TwoChains-RareTail-v0"
 
 
 def ensure_dir(path: str):
@@ -166,8 +166,8 @@ def make_all_plots_for_q(q_values: np.ndarray, out_dir: str, title_prefix: str):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Visualize Q and V for the ToyPERBias environment. "
-            "Requires q_values.npy under results/ToyPERBias-v0/<agent>/seed_XX/."
+            "Visualize Q and V for the TwoChains environment. "
+            "Requires q_values.npy under results/TwoChains-RareTail-v0/<agent>/seed_XX/."
         )
     )
     parser.add_argument(

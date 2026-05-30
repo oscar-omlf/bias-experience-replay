@@ -7,9 +7,9 @@ seed: 1
 device: auto
 
 wandb:
-  project: ber-final-run-march
-  entity: bias-experience-replay
-  mode: online
+  project: bias-experience-replay
+  entity: null
+  mode: disabled
   group: null
   job_type: train
 
@@ -18,4 +18,3 @@ train:
   eval_interval_episodes: 10
   checkpoint_interval_episodes: 0
   save_dir: outputs/checkpoints
-  

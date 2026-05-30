@@ -1,0 +1,7 @@
+id: FrozenLake-H50
+is_slippery: true
+map_name: "8x8"
+success_rate: 0.99
+reward_schedule: [50.0, -100.0, -0.01]
+max_episode_steps: 200
+render_mode: null

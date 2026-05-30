@@ -1,9 +1,9 @@
-id: OutlierBandit-v0
+id: OutlierBandit-SuboptimalTail-v0
 max_episode_steps: 1
 n_actions: 2
-# r = r_high w.p. p_success[a], else r_low
-r_low: 1.0
-r_high: 100.0
-# action0: deterministic-ish baseline mean=1.0 (p=0)
-# action1: rare outlier with much higher mean (p=0.01 -> mean=1.99)
+# r = r_high[a] w.p. p_success[a], else r_low[a]
+# action 0: safe reward 2.0
+# action 1: reward 100.0 w.p. 0.01, else 0.0; expectation 1.0
+r_low: [2.0, 0.0]
+r_high: [2.0, 100.0]
 p_success: [0.0, 0.01]

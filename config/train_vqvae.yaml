@@ -7,10 +7,10 @@ seed: 1
 device: auto
 
 wandb:
-  project: ber-final-vqvae-train
-  entity: bias-experience-replay
-  mode: online
-  group: vqvae_minatar_breakout
+  project: bias-experience-replay-vqvae
+  entity: null
+  mode: disabled
+  group: null
   job_type: train_vqvae
 
 train:
@@ -23,9 +23,9 @@ train:
   eval_only: false
 
 vqvae:
-  grid_size: 1
-  codebook_size: 256
-  embed_dim: 32
+  grid_size: [2, 1]
+  codebook_size: 16
+  embed_dim: 64
   hidden_channels: 64
   beta: 0.25
 
@@ -39,6 +39,6 @@ diagnostics:
   bucket_thresholds: [5, 10, 50, 100]
 
 outputs:
-  save_path: artifacts/vqvae_minatar_breakout_z0.10.pt
-  dump_examples_path: artifacts/vqvae_group_examples_breakout_z0.10.txt
+  save_path: artifacts/vqvae_breakout_2x1_k16_d64_b025.pt
+  dump_examples_path: artifacts/vqvae_group_examples_breakout_2x1_k16_d64_b025.txt
   load_path: null

@@ -1,7 +1,10 @@
-id: FrozenLake
+id: FrozenLake-H100
 is_slippery: true
 map_name: "8x8" # 4x4 or 8x8
-success_rate: 0.95
-reward_schedule: [20.0, -100, -0.01]
+# Intended move succeeds with probability 0.99; the remaining mass is split
+# equally across perpendicular actions by Gymnasium.
+success_rate: 0.99
+# Goal, hole, and frozen-tile rewards for the paper's H100/H300 stress test.
+reward_schedule: [100.0, -300.0, -0.01]
 max_episode_steps: 200
 render_mode: null # null | "human" | "ansi"

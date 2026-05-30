@@ -6,16 +6,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def load_q_values_for_agent(agent: str, results_root: str = "results") -> Tuple[List[int], List[np.ndarray], str]:
+def load_q_values_for_agent(
+    agent: str,
+    results_root: str = "results",
+    env_key: str = "FrozenLake-H100-8x8",
+) -> Tuple[List[int], List[np.ndarray], str]:
     """
     Load q_values.npy for all seeds of a given agent.
 
     Returns:
         seeds: list of seed integers
         q_tables: list of numpy arrays (one per seed), shape [n_states, n_actions]
-        agent_dir: path to results/<agent> directory
+        agent_dir: path to results/<env_key>/<agent> directory
     """
-    agent_dir = os.path.join(results_root, agent)
+    agent_dir = os.path.join(results_root, env_key, agent)
     if not os.path.isdir(agent_dir):
         raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
 
@@ -331,8 +335,14 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Visualize Q-tables for FrozenLake-style grids. "
-            "Requires q_values.npy under results/<agent>/seed_XX/."
+            "Requires q_values.npy under results/<env-key>/<agent>/seed_XX/."
         )
+    )
+    parser.add_argument(
+        "--env-key",
+        type=str,
+        default="FrozenLake-H100-8x8",
+        help="Environment result directory under --results-root.",
     )
     parser.add_argument(
         "--agent",
@@ -360,6 +370,7 @@ def main():
     seeds, q_tables, agent_dir = load_q_values_for_agent(
         agent=args.agent,
         results_root=args.results_root,
+        env_key=args.env_key,
     )
 
     # Per-seed plots

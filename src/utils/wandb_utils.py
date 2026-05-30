@@ -33,7 +33,7 @@ def setup_wandb(cfg, config_dict=None):
 
     group = getattr(cfg.wandb, "group", None)
     if not group:
-        group = "FrozenLake-8x8"
+        group = env_name
 
     run = wandb.init(
         project=cfg.wandb.project,
